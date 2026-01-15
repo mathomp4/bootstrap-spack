@@ -57,7 +57,7 @@ STARTER_ENV_SPECS = [
     "gftl-shared",
     "fargparse",
     "pfunit",
-    "pflogger",
+    "pflogger +mpi",
     "yafyaml",
     "mepo",
     "udunits",
