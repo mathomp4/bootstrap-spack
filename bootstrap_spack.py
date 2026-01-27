@@ -471,6 +471,49 @@ def ensure_config(spack_root: str, *, dry_run: bool) -> None:
 
 
 
+def auto_env_name(base: str, compiler: str | None, python: str | None) -> str:
+    """
+    Generate environment name from toolchain specs.
+    Examples:
+      gcc@14, 3.12   -> geos-gcc14-py312
+      gcc@15, None   -> geos-gcc15
+      None, 3.12     -> geos-py312
+      None, None     -> geos
+    """
+    parts = [base]
+    
+    if compiler:
+        # Extract compiler name and version from specs like "gcc@14" or "apple-clang@17.0.6"
+        comp = compiler.strip()
+        if '@' in comp:
+            name, ver = comp.split('@', 1)
+            # Simplify version to major version for common compilers
+            ver_parts = ver.split('.')
+            if name in ('gcc', 'gfortran', 'nag'):
+                ver_short = ver_parts[0]
+            elif name in ('apple-clang', 'clang'):
+                ver_short = ver_parts[0]
+            else:
+                ver_short = ver_parts[0]
+            parts.append(f"{name.replace('-', '')}{ver_short}")
+        else:
+            # No version specified, just use compiler name
+            parts.append(comp.replace('-', ''))
+    
+    if python:
+        # Extract Python version from specs like "3.12", "@3.11", "3.10.2"
+        py = python.strip().lstrip('@')
+        py_parts = py.split('.')
+        # Use major.minor for Python
+        if len(py_parts) >= 2:
+            py_short = f"py{py_parts[0]}{py_parts[1]}"
+        else:
+            py_short = f"py{py_parts[0]}"
+        parts.append(py_short)
+    
+    return "-".join(parts)
+
+
 def create_env(
     spack_root: str,
     env_dir: Path,
@@ -547,6 +590,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     # env-create: create a named environment (optionally with compiler constraint)
     p_envc = sub.add_parser("env-create", help="Create a managed Spack environment under environments_root")
     p_envc.add_argument("--name", default="geos", help="Environment name (default: geos)")
+    p_envc.add_argument("--auto-name", action="store_true", help="Auto-generate name from compiler/python specs")
     p_envc.add_argument("--compiler", default=None, help="Compiler constraint (e.g., gcc@15, apple-clang@17, nag)")
     p_envc.add_argument("--python", default=None, help="Python version constraint (e.g., 3.12, @3.11, @3.10.2)")
 
@@ -619,9 +663,13 @@ def main(argv: list[str]) -> int:
         compiler = None
         python = None
         if cmd == "env-create":
-            env_name = getattr(args, "name", "geos")
             compiler = getattr(args, "compiler", None)
             python = getattr(args, "python", None)
+            auto_name = getattr(args, "auto_name", False)
+            if auto_name:
+                env_name = auto_env_name("geos", compiler, python)
+            else:
+                env_name = getattr(args, "name", "geos")
         env_path = env_root / env_name
 
         create_env(spack_root, env_path, dry_run=dry_run, env_name=env_name, compiler=compiler, python=python)
