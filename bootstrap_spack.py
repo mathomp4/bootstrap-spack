@@ -478,6 +478,7 @@ def create_env(
     dry_run: bool,
     env_name: str = "geos",
     compiler: str | None = None,
+    python: str | None = None,
 ) -> None:
     if env_dir.exists():
         eprint(f"==> Environment already exists: {env_dir}")
@@ -495,12 +496,15 @@ def create_env(
     specs = "\n".join(spec_lines)
 
     packages_block = ""
-    if compiler:
-        packages_block = f"""
-  packages:
-    all:
-      compiler: [{compiler}]
-"""
+    if compiler or python:
+        lines = ["  packages:"]
+        if compiler:
+            lines.append("    all:")
+            lines.append(f"      compiler: [{compiler}]")
+        if python:
+            lines.append("    python:")
+            lines.append(f"      require: '{python}'")
+        packages_block = "\n" + "\n".join(lines) + "\n"
 
     content = f"""spack:
   specs:
@@ -514,7 +518,7 @@ def create_env(
 
     if dry_run:
         eprint(f"[dry-run] would create directory {env_dir}")
-        eprint(f"[dry-run] would write {spack_yaml} with compiler pin = {compiler!r}")
+        eprint(f"[dry-run] would write {spack_yaml} with compiler pin = {compiler!r}, python pin = {python!r}")
         return
 
     env_dir.mkdir(parents=True, exist_ok=True)
@@ -544,6 +548,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p_envc = sub.add_parser("env-create", help="Create a managed Spack environment under environments_root")
     p_envc.add_argument("--name", default="geos", help="Environment name (default: geos)")
     p_envc.add_argument("--compiler", default=None, help="Compiler constraint (e.g., gcc@15, apple-clang@17, nag)")
+    p_envc.add_argument("--python", default=None, help="Python version constraint (e.g., 3.12, @3.11, @3.10.2)")
 
     p.set_defaults(cmd="all")
     return p.parse_args(argv)
@@ -612,12 +617,14 @@ def main(argv: list[str]) -> int:
         env_root = Path.home() / "spack-envs"
         env_name = "geos"
         compiler = None
+        python = None
         if cmd == "env-create":
             env_name = getattr(args, "name", "geos")
             compiler = getattr(args, "compiler", None)
+            python = getattr(args, "python", None)
         env_path = env_root / env_name
 
-        create_env(spack_root, env_path, dry_run=dry_run, env_name=env_name, compiler=compiler)
+        create_env(spack_root, env_path, dry_run=dry_run, env_name=env_name, compiler=compiler, python=python)
 
         if cmd == "env-create":
             print_minimal_advice(spack_root, env_name)
