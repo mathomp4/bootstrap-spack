@@ -88,22 +88,22 @@ def print_minimal_advice(spack_root: str, env_name: str | None = None) -> None:
     eprint("")
 
 
-plateforms = {
+platforms = {
     "MacOS": "darwin",
     "Linux": "linux",
 }
 
 
 def is_supported_platform() -> bool:
-    return sys.platform in list(plateforms.values())
+    return sys.platform in list(platforms.values())
 
 
 def is_mac_os() -> bool:
-    return sys.platform == plateforms["MacOS"]
+    return sys.platform == platforms["MacOS"]
 
 
 def is_linux() -> bool:
-    return sys.platform == plateforms["Linux"]
+    return sys.platform == platforms["Linux"]
 
 
 def run(cmd: Sequence[str], *, dry_run: bool, check: bool = True, env: dict | None = None) -> subprocess.CompletedProcess:
@@ -552,7 +552,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
     if not is_supported_platform():
-        eprint(f"ERROR: this bootstrap currently targets {list(plateforms.values())}.")
+        eprint(f"ERROR: this bootstrap currently targets {list(platforms.values())}.")
         return 2
 
     dry_run = bool(args.dry_run)
