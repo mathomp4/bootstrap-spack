@@ -38,7 +38,7 @@ import shlex
 import subprocess
 import sys
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Sequence
 
 BREW_PKGS = ["coreutils", "gcc", "git", "wget", "bash", "tcsh", "cmake", "openssl", "rust"]
 
@@ -87,8 +87,23 @@ def print_minimal_advice(spack_root: str, env_name: str | None = None) -> None:
     eprint("=" * 64)
     eprint("")
 
-def is_macos() -> bool:
-    return sys.platform == "darwin"
+
+platforms = {
+    "MacOS": "darwin",
+    "Linux": "linux",
+}
+
+
+def is_supported_platform() -> bool:
+    return sys.platform in list(platforms.values())
+
+
+def is_mac_os() -> bool:
+    return sys.platform == platforms["MacOS"]
+
+
+def is_linux() -> bool:
+    return sys.platform == platforms["Linux"]
 
 
 def run(cmd: Sequence[str], *, dry_run: bool, check: bool = True, env: dict | None = None) -> subprocess.CompletedProcess:
@@ -435,13 +450,14 @@ def ensure_config(spack_root: str, *, dry_run: bool) -> None:
     spack_run(spack_root, ["external", "find", "bash"], dry_run=dry_run, check=False)
 
     # Ensure tcsh external using spack python rather than config add
-    brew = shutil_which("brew") or str(Path.home() / ".homebrew" / "bin" / "brew")
-    brew_prefix = "/opt/homebrew"
-    if not dry_run:
-        r = run([brew, "--prefix"], dry_run=False, check=False)
-        if r.returncode == 0 and r.stdout.strip():
-            brew_prefix = r.stdout.strip()
-    ensure_tcsh_external_via_spack_python(spack_root, dry_run=dry_run, brew_prefix=brew_prefix)
+    if is_mac_os():
+        brew = shutil_which("brew") or str(Path.home() / ".homebrew" / "bin" / "brew")
+        brew_prefix = "/opt/homebrew"
+        if not dry_run:
+            r = run([brew, "--prefix"], dry_run=False, check=False)
+            if r.returncode == 0 and r.stdout.strip():
+                brew_prefix = r.stdout.strip()
+        ensure_tcsh_external_via_spack_python(spack_root, dry_run=dry_run, brew_prefix=brew_prefix)
 
     user_cfg = spack_user_cfg_dir(spack_root, dry_run=dry_run)
     concretizer_yaml = user_cfg / "concretizer.yaml"
@@ -535,14 +551,15 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
-    if not is_macos():
-        eprint("ERROR: this bootstrap currently targets macOS.")
+    if not is_supported_platform():
+        eprint(f"ERROR: this bootstrap currently targets {list(platforms.values())}.")
         return 2
 
     dry_run = bool(args.dry_run)
 
     # Brew is always useful early
-    brew = ensure_homebrew(dry_run=dry_run)
+    if is_mac_os():
+        brew = ensure_homebrew(dry_run=dry_run)
 
     # Determine spack choice
     spack_choice = args.spack
@@ -563,7 +580,8 @@ def main(argv: list[str]) -> int:
     cmd = args.cmd
 
     if cmd in ("all", "brew"):
-        ensure_brew_prereqs(brew, dry_run=dry_run)
+        if is_mac_os():
+            ensure_brew_prereqs(brew, dry_run=dry_run)
         if cmd == "brew":
             return 0
 
