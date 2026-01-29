@@ -771,6 +771,7 @@ def create_env(
     compiler_c: str | None = None,
     compiler_fortran: str | None = None,
     python: str | None = None,
+    python_optimizations: bool = False,
     sandbox: Path | None = None,
     custom_spec: str | None = None,
     target: str | None = None,
@@ -870,14 +871,21 @@ def create_env(
     specs = "\n".join(spec_lines)
 
     packages_block = ""
-    if python:
+    if python or python_optimizations:
         lines = ["  packages:"]
-        # Ensure Python version has @ prefix for proper spec format
-        py_spec = python.strip()
-        if not py_spec.startswith("@"):
-            py_spec = f"@{py_spec}"
         lines.append("    python:")
-        lines.append(f"      require: '{py_spec}'")
+        if python:
+            # Ensure Python version has @ prefix for proper spec format
+            py_spec = python.strip()
+            if not py_spec.startswith("@"):
+                py_spec = f"@{py_spec}"
+            # Add variant if optimizations requested
+            if python_optimizations:
+                py_spec = f"{py_spec}+optimizations"
+            lines.append(f"      require: '{py_spec}'")
+        elif python_optimizations:
+            # Just the variant, no version constraint
+            lines.append("      require: '+optimizations'")
         packages_block = "\n" + "\n".join(lines) + "\n"
 
     # Add compiler env vars to work around Spack bug #51855
@@ -910,6 +918,7 @@ def create_env(
         eprint(f"[dry-run]   C/C++ compiler: {c_spec or 'default'}")
         eprint(f"[dry-run]   Fortran compiler: {fortran_spec or 'default'}")
         eprint(f"[dry-run]   Python: {python or 'default'}")
+        eprint(f"[dry-run]   Python optimizations: {python_optimizations}")
         eprint(f"[dry-run]   Target: {target or 'default'}")
         return
 
@@ -1069,6 +1078,11 @@ EXAMPLES:
         help="Python version constraint (e.g., 3.12, @3.11, 3.10.2)",
     )
     p_envc.add_argument(
+        "--python-optimizations",
+        action="store_true",
+        help="Build Python with +optimizations variant (enables PGO for better performance, but slower build)",
+    )
+    p_envc.add_argument(
         "--spec",
         default=None,
         help="Use a custom spec (e.g., 'geosgcm', 'mapl') instead of individual packages. "
@@ -1183,12 +1197,14 @@ def main(argv: list[str]) -> int:
         compiler_c = None
         compiler_fortran = None
         python = None
+        python_optimizations = False
         target = None
         if cmd == "env-create":
             compiler = getattr(args, "compiler", None)
             compiler_c = getattr(args, "compiler_c", None)
             compiler_fortran = getattr(args, "compiler_fortran", None)
             python = getattr(args, "python", None)
+            python_optimizations = getattr(args, "python_optimizations", False)
             target = getattr(args, "target", None)
             custom_spec = getattr(args, "spec", None)
             auto_name = getattr(args, "auto_name", False)
@@ -1211,6 +1227,7 @@ def main(argv: list[str]) -> int:
             compiler_c=compiler_c,
             compiler_fortran=compiler_fortran,
             python=python,
+            python_optimizations=python_optimizations,
             sandbox=sandbox,
             custom_spec=custom_spec,
             target=target,

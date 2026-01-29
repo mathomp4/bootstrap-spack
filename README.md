@@ -139,6 +139,10 @@ This is the recommended best practice on macOS for optimal performance and compa
 ./bootstrap_spack.py --spack mathomp4 env-create --auto-name --compiler gcc@15 --target x86_64_v3
 # Creates: geos-gcc15 optimized for x86_64_v3 microarchitecture
 
+# With Python optimizations (PGO for better runtime performance)
+./bootstrap_spack.py --spack mathomp4 env-create --auto-name --compiler gcc@15 --python 3.12 --python-optimizations
+# Creates: geos-gcc15-py312 with optimized Python build
+
 # NOTE: --compiler apple-clang@17 alone will ERROR (no Fortran compiler)
 # Use one of these instead:
 
@@ -418,6 +422,19 @@ spack concretize
 spack install --only dependencies
 ```
 
+### Create Environment with Optimized Python
+
+```bash
+./bootstrap_spack.py --spack mathomp4 env-create --auto-name \
+  --compiler gcc@15 --python 3.12 --python-optimizations
+source ~/spack-mathomp4/share/spack/setup-env.sh
+spack env activate geos-gcc15-py312
+spack concretize
+spack install --only dependencies
+```
+
+**Note:** The Python build will take significantly longer with `--python-optimizations`, but you'll get 10-30% better Python runtime performance.
+
 ### Testing a Fork Before Committing
 
 ```bash
@@ -482,6 +499,22 @@ Preview what the script would do without making any changes:
 ./bootstrap_spack.py --dry-run --spack official setup
 ./bootstrap_spack.py --dry-run --sandbox ~/test --spack mathomp4 all
 ```
+
+## Python Optimizations
+
+You can build Python with profile-guided optimization (PGO) using the `--python-optimizations` flag. This enables the `+optimizations` variant in Spack, which results in a significantly faster Python interpreter (typically 10-30% performance improvement) at the cost of longer build time.
+
+```bash
+# Build Python with optimizations
+./bootstrap_spack.py --spack mathomp4 env-create --auto-name \
+  --compiler gcc@15 --python 3.12 --python-optimizations
+
+# Combine with other options
+./bootstrap_spack.py --spack mathomp4 env-create --auto-name \
+  --compiler gcc@15 --python 3.12 --python-optimizations --target x86_64_v3
+```
+
+**Note:** Building Python with `+optimizations` takes significantly longer (the build compiles Python twice: once to gather profiling data, then again with optimizations based on that profile). The runtime performance improvement is substantial for Python-heavy workloads.
 
 ## Target Architecture
 
