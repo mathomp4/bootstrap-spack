@@ -22,7 +22,7 @@ SUBCOMMANDS:
 DEFAULT BEHAVIOR:
   Running ./bootstrap_spack.py with no arguments is equivalent to:
     ./bootstrap_spack.py all
-  
+
   This will:
     1. Prompt you to choose which Spack to use (interactive mode)
     2. Install Homebrew prerequisites (macOS only)
@@ -34,12 +34,12 @@ DEFAULT BEHAVIOR:
 SANDBOX MODE:
   Use --sandbox <dir> to install everything in an isolated directory for testing:
     ./bootstrap_spack.py --sandbox /tmp/test-spack --spack official setup
-  
+
   This will install:
     - Spack repos:      <sandbox>/spack, <sandbox>/spack-packages, etc.
     - User config:      <sandbox>/.spack (instead of ~/.spack)
     - Environments:     <sandbox>/spack-envs
-  
+
   Useful for testing changes without affecting your main Spack installation.
 
 USAGE EXAMPLES:
@@ -105,66 +105,86 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
-BREW_PKGS = ["coreutils", "gcc", "git", "wget", "bash", "tcsh", "cmake", "openssl", "rust"]
+BREW_PKGS = [
+    "coreutils",
+    "gcc",
+    "git",
+    "wget",
+    "bash",
+    "tcsh",
+    "cmake",
+    "openssl",
+    "rust",
+]
 
 EXTERNAL_FIND_EXCLUDES = [
-    "bison", "openssl", "gmake", "m4", "curl", "python", "gettext", "perl", "meson"
+    "bison",
+    "openssl",
+    "gmake",
+    "m4",
+    "curl",
+    "python",
+    "gettext",
+    "perl",
+    "meson",
 ]
 
 # Default spec for environments (GEOSgcm and its dependencies)
 DEFAULT_SPEC = "geosgcm"
 
 
-def find_system_compiler_paths(c_spec: str | None, fortran_spec: str | None) -> dict[str, str]:
+def find_system_compiler_paths(
+    c_spec: str | None, fortran_spec: str | None
+) -> dict[str, str]:
     """
     Find actual system paths to compilers (not Spack wrappers).
     Returns dict with CC, CXX, and/or FC set to system paths.
     """
     env_vars = {}
-    
+
     # C/C++ compiler
-    if c_spec and 'gcc' in c_spec:
+    if c_spec and "gcc" in c_spec:
         # gcc-based C/C++
         # Extract version if specified (gcc@15 -> gcc-15)
-        if '@' in c_spec:
-            name, ver = c_spec.split('@', 1)
-            ver_major = ver.split('.')[0]
+        if "@" in c_spec:
+            name, ver = c_spec.split("@", 1)
+            ver_major = ver.split(".")[0]
             gcc_name = f"gcc-{ver_major}"
             gxx_name = f"g++-{ver_major}"
         else:
             gcc_name = "gcc"
             gxx_name = "g++"
-        
+
         gcc_path = shutil_which(gcc_name)
         gxx_path = shutil_which(gxx_name)
         if gcc_path:
-            env_vars['CC'] = gcc_path
+            env_vars["CC"] = gcc_path
         if gxx_path:
-            env_vars['CXX'] = gxx_path
+            env_vars["CXX"] = gxx_path
     else:
         # Default to clang/clang++ (apple-clang or system default)
-        clang_path = shutil_which('clang')
-        clangxx_path = shutil_which('clang++')
+        clang_path = shutil_which("clang")
+        clangxx_path = shutil_which("clang++")
         if clang_path:
-            env_vars['CC'] = clang_path
+            env_vars["CC"] = clang_path
         if clangxx_path:
-            env_vars['CXX'] = clangxx_path
-    
+            env_vars["CXX"] = clangxx_path
+
     # Fortran compiler
     if fortran_spec:
-        if 'gcc' in fortran_spec or 'gfortran' in fortran_spec:
+        if "gcc" in fortran_spec or "gfortran" in fortran_spec:
             # Extract version for gfortran
-            if '@' in fortran_spec:
-                _, ver = fortran_spec.split('@', 1)
-                ver_major = ver.split('.')[0]
+            if "@" in fortran_spec:
+                _, ver = fortran_spec.split("@", 1)
+                ver_major = ver.split(".")[0]
                 gfortran_name = f"gfortran-{ver_major}"
             else:
                 gfortran_name = "gfortran"
-            
+
             gfortran_path = shutil_which(gfortran_name)
             if gfortran_path:
-                env_vars['FC'] = gfortran_path
-    
+                env_vars["FC"] = gfortran_path
+
     return env_vars
 
 
@@ -172,8 +192,12 @@ def eprint(*args: object) -> None:
     print(*args, file=sys.stderr)
 
 
-
-def print_minimal_advice(spack_root: str, env_name: str | None = None, sandbox: Path | None = None, spec: str | None = None) -> None:
+def print_minimal_advice(
+    spack_root: str,
+    env_name: str | None = None,
+    sandbox: Path | None = None,
+    spec: str | None = None,
+) -> None:
     eprint("")
     eprint("=" * 64)
     eprint("Spack bootstrap complete.")
@@ -215,7 +239,9 @@ def is_linux() -> bool:
     return sys.platform == platforms["Linux"]
 
 
-def run(cmd: Sequence[str], *, dry_run: bool, check: bool = True, env: dict | None = None) -> subprocess.CompletedProcess:
+def run(
+    cmd: Sequence[str], *, dry_run: bool, check: bool = True, env: dict | None = None
+) -> subprocess.CompletedProcess:
     if dry_run:
         eprint("[dry-run]", " ".join(shlex.quote(c) for c in cmd))
         # Fake a CompletedProcess
@@ -227,7 +253,9 @@ def run(cmd: Sequence[str], *, dry_run: bool, check: bool = True, env: dict | No
     return subprocess.run(cmd, check=check, text=True, capture_output=True, env=run_env)
 
 
-def run_bash(script: str, *, dry_run: bool, check: bool = True) -> subprocess.CompletedProcess:
+def run_bash(
+    script: str, *, dry_run: bool, check: bool = True
+) -> subprocess.CompletedProcess:
     return run(["bash", "-lc", script], dry_run=dry_run, check=check)
 
 
@@ -289,14 +317,23 @@ def git_clone_if_missing(url: str, dest: Path, *, dry_run: bool) -> None:
         return
     eprint(f"==> Cloning {url} -> {dest}")
     dest.parent.mkdir(parents=True, exist_ok=True)
-    run(["git", "clone", "-c", "feature.manyFiles=true", url, str(dest)], dry_run=dry_run)
+    run(
+        ["git", "clone", "-c", "feature.manyFiles=true", url, str(dest)],
+        dry_run=dry_run,
+    )
 
 
-def spack_layout(spack_choice: str, fork: str | None, spack_repo: str | None, spack_packages_repo: str | None, sandbox: Path | None = None) -> dict:
+def spack_layout(
+    spack_choice: str,
+    fork: str | None,
+    spack_repo: str | None,
+    spack_packages_repo: str | None,
+    sandbox: Path | None = None,
+) -> dict:
     """
     Return dict with:
       fork_slug, spack_repo, spack_packages_repo, spack_root, spack_packages_dir
-    
+
     If sandbox is provided, all paths will be under sandbox directory.
     """
     base = sandbox if sandbox else Path.home()
@@ -382,24 +419,43 @@ def make_spack_env(sandbox: Path | None = None) -> dict[str, str]:
     return env
 
 
-def spack_cmd(spack_root: str, args: Sequence[str], env_vars: dict | None = None) -> str:
+def spack_cmd(
+    spack_root: str, args: Sequence[str], env_vars: dict | None = None
+) -> str:
     # Return a bash -lc string that runs spack with given args.
     return f"{spack_bash_prefix(spack_root, env_vars)} && spack {' '.join(shlex.quote(a) for a in args)}"
 
 
-def spack_run(spack_root: str, args: Sequence[str], *, dry_run: bool, check: bool = True, sandbox: Path | None = None) -> subprocess.CompletedProcess:
+def spack_run(
+    spack_root: str,
+    args: Sequence[str],
+    *,
+    dry_run: bool,
+    check: bool = True,
+    sandbox: Path | None = None,
+) -> subprocess.CompletedProcess:
     env_vars = make_spack_env(sandbox)
     return run_bash(spack_cmd(spack_root, args, env_vars), dry_run=dry_run, check=check)
 
 
-def spack_user_cfg_dir(spack_root: str, *, dry_run: bool, sandbox: Path | None = None) -> Path:
+def spack_user_cfg_dir(
+    spack_root: str, *, dry_run: bool, sandbox: Path | None = None
+) -> Path:
     # Spack >=1.2: print-file gives us the exact file path.
-    r = spack_run(spack_root, ["config", "--scope", "user", "edit", "--print-file", "config"], dry_run=dry_run, check=False, sandbox=sandbox)
+    r = spack_run(
+        spack_root,
+        ["config", "--scope", "user", "edit", "--print-file", "config"],
+        dry_run=dry_run,
+        check=False,
+        sandbox=sandbox,
+    )
     if dry_run:
         # Best guess; used only for printing in dry-run mode
         return (sandbox / ".spack") if sandbox else (Path.home() / ".spack")
     if r.returncode != 0:
-        raise SystemExit("ERROR: couldn't determine user config dir (spack config edit --print-file config failed)")
+        raise SystemExit(
+            "ERROR: couldn't determine user config dir (spack config edit --print-file config failed)"
+        )
     path = r.stdout.strip().splitlines()[-1].strip()
     if not path:
         raise SystemExit("ERROR: spack didn't print a config file path for user scope")
@@ -408,9 +464,15 @@ def spack_user_cfg_dir(spack_root: str, *, dry_run: bool, sandbox: Path | None =
     return p.parent
 
 
-def ensure_spack(spack_root: str, spack_repo: str, *, dry_run: bool, sandbox: Path | None = None) -> None:
-    git_clone_if_missing(f"git@github.com:{spack_repo}.git", Path(spack_root), dry_run=dry_run)
-    r = spack_run(spack_root, ["--version"], dry_run=dry_run, check=False, sandbox=sandbox)
+def ensure_spack(
+    spack_root: str, spack_repo: str, *, dry_run: bool, sandbox: Path | None = None
+) -> None:
+    git_clone_if_missing(
+        f"git@github.com:{spack_repo}.git", Path(spack_root), dry_run=dry_run
+    )
+    r = spack_run(
+        spack_root, ["--version"], dry_run=dry_run, check=False, sandbox=sandbox
+    )
     if dry_run:
         eprint("==> Spack available: spack")
     else:
@@ -419,12 +481,25 @@ def ensure_spack(spack_root: str, spack_repo: str, *, dry_run: bool, sandbox: Pa
             eprint(r.stdout.strip())
 
 
-def ensure_repos(spack_root: str, spack_packages_dir: str, spack_packages_repo: str, *, dry_run: bool, sandbox: Path | None = None) -> None:
-    git_clone_if_missing(f"git@github.com:{spack_packages_repo}.git", Path(spack_packages_dir), dry_run=dry_run)
+def ensure_repos(
+    spack_root: str,
+    spack_packages_dir: str,
+    spack_packages_repo: str,
+    *,
+    dry_run: bool,
+    sandbox: Path | None = None,
+) -> None:
+    git_clone_if_missing(
+        f"git@github.com:{spack_packages_repo}.git",
+        Path(spack_packages_dir),
+        dry_run=dry_run,
+    )
 
     base = sandbox if sandbox else Path.home()
     geosesm_dir = base / "geosesm-spack"
-    git_clone_if_missing("git@github.com:GMAO-SI-Team/geosesm-spack.git", geosesm_dir, dry_run=dry_run)
+    git_clone_if_missing(
+        "git@github.com:GMAO-SI-Team/geosesm-spack.git", geosesm_dir, dry_run=dry_run
+    )
 
     user_cfg = spack_user_cfg_dir(spack_root, dry_run=dry_run, sandbox=sandbox)
     repos_yaml = user_cfg / "repos.yaml"
@@ -448,22 +523,32 @@ def backup_user_cfg(user_cfg: Path, *, dry_run: bool) -> Path:
     if not dry_run:
         bdir.mkdir(parents=True, exist_ok=True)
 
-    for name in ["repos.yaml", "packages.yaml", "concretizer.yaml", "config.yaml", "compilers.yaml"]:
+    for name in [
+        "repos.yaml",
+        "packages.yaml",
+        "concretizer.yaml",
+        "config.yaml",
+        "compilers.yaml",
+    ]:
         src = user_cfg / name
         if src.exists():
             if dry_run:
-                eprint(f"[dry-run] cp -a {src} {bdir/name}")
+                eprint(f"[dry-run] cp -a {src} {bdir / name}")
             else:
                 (bdir / name).write_bytes(src.read_bytes())
             eprint(f"==>   backed up: {name}")
     return bdir
 
 
-def reset_user_cfg(spack_root: str, *, dry_run: bool, sandbox: Path | None = None) -> None:
+def reset_user_cfg(
+    spack_root: str, *, dry_run: bool, sandbox: Path | None = None
+) -> None:
     user_cfg = spack_user_cfg_dir(spack_root, dry_run=dry_run, sandbox=sandbox)
     backup_user_cfg(user_cfg, dry_run=dry_run)
 
-    eprint(f"==> Resetting (removing) user config files managed by this tool in: {user_cfg}")
+    eprint(
+        f"==> Resetting (removing) user config files managed by this tool in: {user_cfg}"
+    )
     for name in ["repos.yaml", "packages.yaml", "concretizer.yaml"]:
         p = user_cfg / name
         if p.exists():
@@ -476,7 +561,9 @@ def reset_user_cfg(spack_root: str, *, dry_run: bool, sandbox: Path | None = Non
             eprint(f"==>   absent:  {name}")
 
 
-def ensure_tcsh_external_via_spack_python(spack_root: str, *, dry_run: bool, brew_prefix: str, sandbox: Path | None = None) -> None:
+def ensure_tcsh_external_via_spack_python(
+    spack_root: str, *, dry_run: bool, brew_prefix: str, sandbox: Path | None = None
+) -> None:
     """
     Use `spack python` (Spack's Python environment) to edit the packages config.
 
@@ -496,7 +583,9 @@ def ensure_tcsh_external_via_spack_python(spack_root: str, *, dry_run: bool, bre
             if len(parts) >= 2:
                 tcsh_ver = parts[1]
 
-    eprint(f"==> Ensuring tcsh external (via spack python): tcsh@{tcsh_ver} prefix={brew_prefix}")
+    eprint(
+        f"==> Ensuring tcsh external (via spack python): tcsh@{tcsh_ver} prefix={brew_prefix}"
+    )
 
     code = f"""
 import spack.config as cfg
@@ -526,7 +615,9 @@ print("ok")
 """.lstrip()
 
     if dry_run:
-        eprint("[dry-run] would run: spack python <tempfile> (update user-scope packages config)")
+        eprint(
+            "[dry-run] would run: spack python <tempfile> (update user-scope packages config)"
+        )
         return
 
     # Write temp script and run it
@@ -549,7 +640,9 @@ print("ok")
                 eprint(proc.stdout.rstrip())
             if proc.stderr.strip():
                 eprint(proc.stderr.rstrip())
-            raise SystemExit(f"ERROR: spack python failed while ensuring tcsh external (exit {proc.returncode})")
+            raise SystemExit(
+                f"ERROR: spack python failed while ensuring tcsh external (exit {proc.returncode})"
+            )
 
         if proc.stdout.strip():
             eprint(proc.stdout.strip())
@@ -562,24 +655,46 @@ print("ok")
                 pass
 
 
-def ensure_config(spack_root: str, *, dry_run: bool, sandbox: Path | None = None) -> None:
+def ensure_config(
+    spack_root: str, *, dry_run: bool, sandbox: Path | None = None
+) -> None:
     eprint("==> Setting build_jobs=6")
-    spack_run(spack_root, ["config", "--scope", "user", "add", "config:build_jobs:6"], dry_run=dry_run, check=False, sandbox=sandbox)
+    spack_run(
+        spack_root,
+        ["config", "--scope", "user", "add", "config:build_jobs:6"],
+        dry_run=dry_run,
+        check=False,
+        sandbox=sandbox,
+    )
 
     base = sandbox if sandbox else Path.home()
     env_root = str(base / "spack-envs")
     eprint(f"==> Setting environments_root={env_root}")
-    spack_run(spack_root, ["config", "--scope", "user", "add", f"config:environments_root:{env_root}"], dry_run=dry_run, check=False, sandbox=sandbox)
+    spack_run(
+        spack_root,
+        ["config", "--scope", "user", "add", f"config:environments_root:{env_root}"],
+        dry_run=dry_run,
+        check=False,
+        sandbox=sandbox,
+    )
 
     eprint("==> Finding compilers")
-    spack_run(spack_root, ["compiler", "find"], dry_run=dry_run, check=False, sandbox=sandbox)
+    spack_run(
+        spack_root, ["compiler", "find"], dry_run=dry_run, check=False, sandbox=sandbox
+    )
 
     eprint("==> Finding externals (with excludes) + bash")
     ext_cmd = ["external", "find"]
     for ex in EXTERNAL_FIND_EXCLUDES:
         ext_cmd.extend(["--exclude", ex])
     spack_run(spack_root, ext_cmd, dry_run=dry_run, check=False, sandbox=sandbox)
-    spack_run(spack_root, ["external", "find", "bash"], dry_run=dry_run, check=False, sandbox=sandbox)
+    spack_run(
+        spack_root,
+        ["external", "find", "bash"],
+        dry_run=dry_run,
+        check=False,
+        sandbox=sandbox,
+    )
 
     # Ensure tcsh external using spack python rather than config add
     if is_mac_os():
@@ -589,7 +704,9 @@ def ensure_config(spack_root: str, *, dry_run: bool, sandbox: Path | None = None
             r = run([brew, "--prefix"], dry_run=False, check=False)
             if r.returncode == 0 and r.stdout.strip():
                 brew_prefix = r.stdout.strip()
-        ensure_tcsh_external_via_spack_python(spack_root, dry_run=dry_run, brew_prefix=brew_prefix, sandbox=sandbox)
+        ensure_tcsh_external_via_spack_python(
+            spack_root, dry_run=dry_run, brew_prefix=brew_prefix, sandbox=sandbox
+        )
 
     user_cfg = spack_user_cfg_dir(spack_root, dry_run=dry_run, sandbox=sandbox)
     concretizer_yaml = user_cfg / "concretizer.yaml"
@@ -599,8 +716,6 @@ def ensure_config(spack_root: str, *, dry_run: bool, sandbox: Path | None = None
         eprint("[dry-run] would write:\n" + content.rstrip())
     else:
         concretizer_yaml.write_text(content)
-
-
 
 
 def auto_env_name(base: str, compiler: str | None, python: str | None) -> str:
@@ -617,25 +732,25 @@ def auto_env_name(base: str, compiler: str | None, python: str | None) -> str:
     if compiler:
         # Extract compiler name and version from specs like "gcc@14" or "apple-clang@17.0.6"
         comp = compiler.strip()
-        if '@' in comp:
-            name, ver = comp.split('@', 1)
+        if "@" in comp:
+            name, ver = comp.split("@", 1)
             # Simplify version to major version for common compilers
-            ver_parts = ver.split('.')
-            if name in ('gcc', 'gfortran', 'nag'):
+            ver_parts = ver.split(".")
+            if name in ("gcc", "gfortran", "nag"):
                 ver_short = ver_parts[0]
-            elif name in ('apple-clang', 'clang'):
+            elif name in ("apple-clang", "clang"):
                 ver_short = ver_parts[0]
             else:
                 ver_short = ver_parts[0]
             parts.append(f"{name.replace('-', '')}{ver_short}")
         else:
             # No version specified, just use compiler name
-            parts.append(comp.replace('-', ''))
+            parts.append(comp.replace("-", ""))
 
     if python:
         # Extract Python version from specs like "3.12", "@3.11", "3.10.2"
-        py = python.strip().lstrip('@')
-        py_parts = py.split('.')
+        py = python.strip().lstrip("@")
+        py_parts = py.split(".")
         # Use major.minor for Python
         if len(py_parts) >= 2:
             py_short = f"py{py_parts[0]}{py_parts[1]}"
@@ -666,7 +781,7 @@ def create_env(
     eprint(f"==> Creating environment: {env_name}")
 
     # Validate apple-clang usage
-    if compiler and 'apple-clang' in compiler and not (compiler_c or compiler_fortran):
+    if compiler and "apple-clang" in compiler and not (compiler_c or compiler_fortran):
         raise SystemExit(
             "ERROR: apple-clang does not include a Fortran compiler.\n"
             "For Fortran support, use one of these options:\n"
@@ -680,10 +795,10 @@ def create_env(
     # unless explicit overrides are provided
     c_spec = None
     fortran_spec = None
-    
+
     if compiler_c or compiler_fortran:
         # Explicit overrides - validate apple-clang + fortran combination
-        if compiler_fortran and 'apple-clang' in compiler_fortran:
+        if compiler_fortran and "apple-clang" in compiler_fortran:
             raise SystemExit(
                 "ERROR: apple-clang does not include a Fortran compiler.\n"
                 "Use gcc, gfortran, or nag for --compiler-fortran."
@@ -692,12 +807,14 @@ def create_env(
         fortran_spec = compiler_fortran
     elif compiler:
         # Smart defaults based on compiler choice
-        if is_mac_os() and compiler.startswith(('gcc', 'gfortran')):
+        if is_mac_os() and compiler.startswith(("gcc", "gfortran")):
             # macOS + gcc: use apple-clang for C/C++, gcc for Fortran
             # Find the default apple-clang version
-            c_spec = 'apple-clang'  # Spack will find the default version
+            c_spec = "apple-clang"  # Spack will find the default version
             fortran_spec = compiler
-            eprint(f"==> macOS detected: using apple-clang for C/C++, {compiler} for Fortran")
+            eprint(
+                f"==> macOS detected: using apple-clang for C/C++, {compiler} for Fortran"
+            )
         else:
             # Use specified compiler for all languages
             c_spec = compiler
@@ -720,26 +837,30 @@ def create_env(
     compiler_suffix = ""
     if c_spec and fortran_spec:
         # Both C/C++ and Fortran specified
-        if is_mac_os() and fortran_spec.startswith('gcc'):
+        if is_mac_os() and fortran_spec.startswith("gcc"):
             # macOS with gcc for Fortran: use conditional constraints to apply correct compiler per language
             compiler_suffix = f" %[when='%c'] c={c_spec} %[when='%cxx'] cxx={c_spec} %[when='%fortran'] fortran={fortran_spec}"
         else:
             # Both compilers, use languages constraint
-            compiler_suffix = f" %{c_spec} languages:=c,cxx %{fortran_spec} languages:=fortran"
+            compiler_suffix = (
+                f" %{c_spec} languages:=c,cxx %{fortran_spec} languages:=fortran"
+            )
     elif c_spec:
         # C/C++ only
         compiler_suffix = f" %{c_spec}"
     elif fortran_spec:
         # Fortran only
-        if is_mac_os() and fortran_spec.startswith('gcc'):
+        if is_mac_os() and fortran_spec.startswith("gcc"):
             # macOS with gcc: explicitly set apple-clang for C/C++, gcc for Fortran
             compiler_suffix = f" %[when='%c'] c=apple-clang %[when='%cxx'] cxx=apple-clang %[when='%fortran'] fortran={fortran_spec}"
         else:
             compiler_suffix = f" %{fortran_spec} languages:=fortran"
-    
+
     if custom_spec:
         spec_lines = [f"    - {custom_spec}{compiler_suffix}"]
-        eprint(f"==> Using custom spec '{custom_spec}' (for 'spack install --only dependencies' workflow)")
+        eprint(
+            f"==> Using custom spec '{custom_spec}' (for 'spack install --only dependencies' workflow)"
+        )
     else:
         # Default: use geosgcm
         spec_lines = [f"    - {DEFAULT_SPEC}{compiler_suffix}"]
@@ -751,7 +872,7 @@ def create_env(
         lines = ["  packages:"]
         # Ensure Python version has @ prefix for proper spec format
         py_spec = python.strip()
-        if not py_spec.startswith('@'):
+        if not py_spec.startswith("@"):
             py_spec = f"@{py_spec}"
         lines.append("    python:")
         lines.append(f"      require: '{py_spec}'")
@@ -825,36 +946,65 @@ EXAMPLES:
 For more details, see the docstring at the top of this script.
         """,
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        add_help=True
+        add_help=True,
     )
-    p.add_argument("--dry-run", action="store_true", help="Print actions without changing anything")
-    p.add_argument("--sandbox", type=Path, default=None,
-                   help="Install everything in this directory (for testing/isolation). "
-                        "Repos, config, and environments will all go under this path.")
+    p.add_argument(
+        "--dry-run", action="store_true", help="Print actions without changing anything"
+    )
+    p.add_argument(
+        "--sandbox",
+        type=Path,
+        default=None,
+        help="Install everything in this directory (for testing/isolation). "
+        "Repos, config, and environments will all go under this path.",
+    )
 
     # Spack selection
-    p.add_argument("--spack", choices=["interactive", "official", "mathomp4", "fork"], default="interactive",
-                   help="Which Spack to use (default: interactive, prompts user)")
-    p.add_argument("--fork", default=None, help="Fork org/user name (required with --spack fork)")
-    p.add_argument("--spack-repo", default=None, help="Override spack repo (e.g., org/spack)")
-    p.add_argument("--spack-packages-repo", default=None, help="Override spack-packages repo (e.g., org/spack-packages)")
-
+    p.add_argument(
+        "--spack",
+        choices=["interactive", "official", "mathomp4", "fork"],
+        default="interactive",
+        help="Which Spack to use (default: interactive, prompts user)",
+    )
+    p.add_argument(
+        "--fork", default=None, help="Fork org/user name (required with --spack fork)"
+    )
+    p.add_argument(
+        "--spack-repo", default=None, help="Override spack repo (e.g., org/spack)"
+    )
+    p.add_argument(
+        "--spack-packages-repo",
+        default=None,
+        help="Override spack-packages repo (e.g., org/spack-packages)",
+    )
 
     sub = p.add_subparsers(dest="cmd", required=False)
 
     # Simple commands with no extra args
-    sub.add_parser("all", help="Full bootstrap: brew + spack + repos + config + default env")
+    sub.add_parser(
+        "all", help="Full bootstrap: brew + spack + repos + config + default env"
+    )
     sub.add_parser("brew", help="Install Homebrew prerequisites only")
     sub.add_parser("spack", help="Clone Spack repository only")
-    sub.add_parser("repos", help="Clone and configure spack-packages and geosesm-spack repos")
-    sub.add_parser("config", help="Configure Spack (build_jobs, compilers, externals, concretizer)")
-    sub.add_parser("setup", help="Complete setup without environment: brew + spack + repos + config")
+    sub.add_parser(
+        "repos", help="Clone and configure spack-packages and geosesm-spack repos"
+    )
+    sub.add_parser(
+        "config", help="Configure Spack (build_jobs, compilers, externals, concretizer)"
+    )
+    sub.add_parser(
+        "setup",
+        help="Complete setup without environment: brew + spack + repos + config",
+    )
     sub.add_parser("env", help="Create default 'geos' environment")
     sub.add_parser("reset", help="Backup and remove user-scope config files")
-    sub.add_parser("config-clean", help="Reset config, then rebuild repos and config from scratch")
+    sub.add_parser(
+        "config-clean", help="Reset config, then rebuild repos and config from scratch"
+    )
 
     # env-create: create a named environment (optionally with compiler constraint)
-    p_envc = sub.add_parser("env-create", 
+    p_envc = sub.add_parser(
+        "env-create",
         help="Create a custom Spack environment with optional compiler/Python constraints",
         description="""
 Create a managed Spack environment under ~/spack-envs with optional toolchain constraints.
@@ -884,24 +1034,44 @@ EXAMPLES:
   %(prog)s --spack mathomp4 env-create --compiler-c apple-clang@17 --compiler-fortran gcc@15
       Explicit control: apple-clang for C/C++, gcc for Fortran
         """,
-        formatter_class=argparse.RawDescriptionHelpFormatter
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    p_envc.add_argument("--name", default="geos", help="Environment name (default: geos)")
-    p_envc.add_argument("--auto-name", action="store_true", 
-                        help="Auto-generate name from compiler/python specs (e.g., geos-gcc15-py312)")
-    p_envc.add_argument("--compiler", default=None, 
-                        help="Compiler constraint (e.g., gcc@15, apple-clang@17). "
-                             "On macOS, gcc@X uses apple-clang for C/C++ and gcc for Fortran.")
-    p_envc.add_argument("--compiler-c", default=None,
-                        help="Explicit C/C++ compiler (overrides --compiler for C/C++)")
-    p_envc.add_argument("--compiler-fortran", default=None,
-                        help="Explicit Fortran compiler (overrides --compiler for Fortran)")
-    p_envc.add_argument("--python", default=None, 
-                        help="Python version constraint (e.g., 3.12, @3.11, 3.10.2)")
-    p_envc.add_argument("--spec", default=None,
-                        help="Use a custom spec (e.g., 'geosgcm', 'mapl') instead of individual packages. "
-                             "Intended for 'spack install --only dependencies' workflow. "
-                             "Automatically adds CC/CXX/FC env vars (Spack bug #51855 workaround).")
+    p_envc.add_argument(
+        "--name", default="geos", help="Environment name (default: geos)"
+    )
+    p_envc.add_argument(
+        "--auto-name",
+        action="store_true",
+        help="Auto-generate name from compiler/python specs (e.g., geos-gcc15-py312)",
+    )
+    p_envc.add_argument(
+        "--compiler",
+        default=None,
+        help="Compiler constraint (e.g., gcc@15, apple-clang@17). "
+        "On macOS, gcc@X uses apple-clang for C/C++ and gcc for Fortran.",
+    )
+    p_envc.add_argument(
+        "--compiler-c",
+        default=None,
+        help="Explicit C/C++ compiler (overrides --compiler for C/C++)",
+    )
+    p_envc.add_argument(
+        "--compiler-fortran",
+        default=None,
+        help="Explicit Fortran compiler (overrides --compiler for Fortran)",
+    )
+    p_envc.add_argument(
+        "--python",
+        default=None,
+        help="Python version constraint (e.g., 3.12, @3.11, 3.10.2)",
+    )
+    p_envc.add_argument(
+        "--spec",
+        default=None,
+        help="Use a custom spec (e.g., 'geosgcm', 'mapl') instead of individual packages. "
+        "Intended for 'spack install --only dependencies' workflow. "
+        "Automatically adds CC/CXX/FC env vars (Spack bug #51855 workaround).",
+    )
 
     p.set_defaults(cmd="all")
     return p.parse_args(argv)
@@ -932,7 +1102,9 @@ def main(argv: list[str]) -> int:
     if spack_choice == "interactive":
         spack_choice, fork = pick_spack_interactive()
 
-    layout = spack_layout(spack_choice, fork, args.spack_repo, args.spack_packages_repo, sandbox)
+    layout = spack_layout(
+        spack_choice, fork, args.spack_repo, args.spack_packages_repo, sandbox
+    )
     spack_root = layout["spack_root"]
     spack_packages_dir = layout["spack_packages_dir"]
 
@@ -953,7 +1125,17 @@ def main(argv: list[str]) -> int:
         if cmd == "brew":
             return 0
 
-    if cmd in ("all", "spack", "repos", "config", "setup", "env", "reset", "config-clean", "env-create"):
+    if cmd in (
+        "all",
+        "spack",
+        "repos",
+        "config",
+        "setup",
+        "env",
+        "reset",
+        "config-clean",
+        "env-create",
+    ):
         ensure_spack(spack_root, layout["spack_repo"], dry_run=dry_run, sandbox=sandbox)
 
     if cmd == "spack":
@@ -965,7 +1147,13 @@ def main(argv: list[str]) -> int:
             return 0
 
     if cmd in ("all", "repos", "setup", "config-clean", "env-create"):
-        ensure_repos(spack_root, spack_packages_dir, layout["spack_packages_repo"], dry_run=dry_run, sandbox=sandbox)
+        ensure_repos(
+            spack_root,
+            spack_packages_dir,
+            layout["spack_packages_repo"],
+            dry_run=dry_run,
+            sandbox=sandbox,
+        )
         if cmd == "repos":
             return 0
 
@@ -976,7 +1164,6 @@ def main(argv: list[str]) -> int:
         if cmd == "setup":
             print_minimal_advice(spack_root, None, sandbox)
             return 0
-
 
     if cmd in ("all", "env", "env-create"):
         # Managed environments live under environments_root (we set this to ~/spack-envs or <sandbox>/spack-envs).
@@ -1004,9 +1191,18 @@ def main(argv: list[str]) -> int:
             custom_spec = None
         env_path = env_root / env_name
 
-        create_env(spack_root, env_path, dry_run=dry_run, env_name=env_name, 
-                   compiler=compiler, compiler_c=compiler_c, compiler_fortran=compiler_fortran,
-                   python=python, sandbox=sandbox, custom_spec=custom_spec)
+        create_env(
+            spack_root,
+            env_path,
+            dry_run=dry_run,
+            env_name=env_name,
+            compiler=compiler,
+            compiler_c=compiler_c,
+            compiler_fortran=compiler_fortran,
+            python=python,
+            sandbox=sandbox,
+            custom_spec=custom_spec,
+        )
 
         if cmd == "env-create":
             spec_name = custom_spec if custom_spec else DEFAULT_SPEC
@@ -1027,6 +1223,7 @@ def main(argv: list[str]) -> int:
             print_minimal_advice(spack_root, None, sandbox)
 
     return 0
+
 
 if __name__ == "__main__":
     raise SystemExit(main(sys.argv[1:]))
