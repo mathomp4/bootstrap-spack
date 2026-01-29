@@ -111,22 +111,8 @@ EXTERNAL_FIND_EXCLUDES = [
     "bison", "openssl", "gmake", "m4", "curl", "python", "gettext", "perl", "meson"
 ]
 
-STARTER_ENV_SPECS = [
-    "python",
-    "py-numpy",
-    "py-pyyaml",
-    "py-ruamel-yaml",
-    "openmpi",
-    "esmf",
-    "gftl",
-    "gftl-shared",
-    "fargparse",
-    "pfunit",
-    "pflogger +mpi",
-    "yafyaml",
-    "mepo",
-    "udunits",
-]
+# Default spec for environments (GEOSgcm and its dependencies)
+DEFAULT_SPEC = "geosgcm"
 
 
 def find_system_compiler_paths(c_spec: str | None, fortran_spec: str | None) -> dict[str, str]:
@@ -187,7 +173,7 @@ def eprint(*args: object) -> None:
 
 
 
-def print_minimal_advice(spack_root: str, env_name: str | None = None, sandbox: Path | None = None) -> None:
+def print_minimal_advice(spack_root: str, env_name: str | None = None, sandbox: Path | None = None, spec: str | None = None) -> None:
     eprint("")
     eprint("=" * 64)
     eprint("Spack bootstrap complete.")
@@ -198,11 +184,14 @@ def print_minimal_advice(spack_root: str, env_name: str | None = None, sandbox: 
     eprint(f'  source "{spack_root}/share/spack/setup-env.sh"')
     eprint("")
     if env_name:
+        if spec:
+            eprint(f"This environment will install dependencies of: {spec}")
+            eprint("")
         eprint("Next steps:")
         eprint("  spack env list")
         eprint(f"  spack env activate {env_name}")
         eprint("  spack concretize")
-        eprint("  spack install")
+        eprint("  spack install --only dependencies")
         eprint("")
     eprint("=" * 64)
     eprint("")
@@ -705,7 +694,8 @@ def create_env(
         # Smart defaults based on compiler choice
         if is_mac_os() and compiler.startswith(('gcc', 'gfortran')):
             # macOS + gcc: use apple-clang for C/C++, gcc for Fortran
-            c_spec = None  # Let Spack use default apple-clang
+            # Find the default apple-clang version
+            c_spec = 'apple-clang'  # Spack will find the default version
             fortran_spec = compiler
             eprint(f"==> macOS detected: using apple-clang for C/C++, {compiler} for Fortran")
         else:
@@ -726,39 +716,45 @@ def create_env(
         unify_val = "true"
 
     # Specs: either individual packages or a custom spec for dependency-only workflow
+    # Build compiler constraint suffix if needed (propagates to all dependencies)
+    compiler_suffix = ""
+    if c_spec and fortran_spec:
+        # Both C/C++ and Fortran specified
+        if is_mac_os() and fortran_spec.startswith('gcc'):
+            # macOS with gcc for Fortran: use conditional constraints to apply correct compiler per language
+            compiler_suffix = f" %[when='%c'] c={c_spec} %[when='%cxx'] cxx={c_spec} %[when='%fortran'] fortran={fortran_spec}"
+        else:
+            # Both compilers, use languages constraint
+            compiler_suffix = f" %{c_spec} languages:=c,cxx %{fortran_spec} languages:=fortran"
+    elif c_spec:
+        # C/C++ only
+        compiler_suffix = f" %{c_spec}"
+    elif fortran_spec:
+        # Fortran only
+        if is_mac_os() and fortran_spec.startswith('gcc'):
+            # macOS with gcc: explicitly set apple-clang for C/C++, gcc for Fortran
+            compiler_suffix = f" %[when='%c'] c=apple-clang %[when='%cxx'] cxx=apple-clang %[when='%fortran'] fortran={fortran_spec}"
+        else:
+            compiler_suffix = f" %{fortran_spec} languages:=fortran"
+    
     if custom_spec:
-        spec_lines = [f"    - {custom_spec}"]
+        spec_lines = [f"    - {custom_spec}{compiler_suffix}"]
         eprint(f"==> Using custom spec '{custom_spec}' (for 'spack install --only dependencies' workflow)")
     else:
-        spec_lines = [f"    - {s}" for s in STARTER_ENV_SPECS]
+        # Default: use geosgcm
+        spec_lines = [f"    - {DEFAULT_SPEC}{compiler_suffix}"]
+        eprint(f"==> Using default spec '{DEFAULT_SPEC}'")
     specs = "\n".join(spec_lines)
 
     packages_block = ""
-    if has_compiler_constraint or python:
+    if python:
         lines = ["  packages:"]
-        
-        # Compiler requirements
-        if c_spec and fortran_spec:
-            # Both specified
-            lines.append("    all:")
-            lines.append(f"      require: ['%{c_spec} languages:=c,cxx', '%{fortran_spec} languages:=fortran']")
-        elif c_spec:
-            # C/C++ only
-            lines.append("    all:")
-            lines.append(f"      require: '%{c_spec}'")
-        elif fortran_spec:
-            # Fortran only (C/C++ will use default)
-            lines.append("    all:")
-            lines.append("      require:")
-            lines.append(f"        - '%{fortran_spec} languages:=fortran'")
-        
-        if python:
-            # Ensure Python version has @ prefix for proper spec format
-            py_spec = python.strip()
-            if not py_spec.startswith('@'):
-                py_spec = f"@{py_spec}"
-            lines.append("    python:")
-            lines.append(f"      require: '{py_spec}'")
+        # Ensure Python version has @ prefix for proper spec format
+        py_spec = python.strip()
+        if not py_spec.startswith('@'):
+            py_spec = f"@{py_spec}"
+        lines.append("    python:")
+        lines.append(f"      require: '{py_spec}'")
         packages_block = "\n" + "\n".join(lines) + "\n"
 
     # Add compiler env vars to work around Spack bug #51855
@@ -1013,7 +1009,8 @@ def main(argv: list[str]) -> int:
                    python=python, sandbox=sandbox, custom_spec=custom_spec)
 
         if cmd == "env-create":
-            print_minimal_advice(spack_root, env_name, sandbox)
+            spec_name = custom_spec if custom_spec else DEFAULT_SPEC
+            print_minimal_advice(spack_root, env_name, sandbox, spec_name)
             return 0
 
         if cmd == "env":

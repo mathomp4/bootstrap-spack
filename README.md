@@ -49,7 +49,7 @@ This will:
 2. Install Homebrew prerequisites
 3. Clone Spack and related repositories
 4. Configure compilers and external packages
-5. Create a default `geos` environment
+5. Create a default `geos` environment with `geosgcm` as the spec
 
 ### Non-interactive Full Bootstrap
 
@@ -106,14 +106,14 @@ Complete setup without creating an environment. Equivalent to: `brew` + `spack` 
 **This is ideal when you want a configured Spack installation but plan to create environments manually.**
 
 ### `env`
-Create the default `geos` starter environment.
+Create the default `geos` starter environment with `geosgcm` spec.
 
 ```bash
 ./bootstrap_spack.py --spack mathomp4 env
 ```
 
 ### `env-create`
-Create a custom environment with optional compiler and Python constraints.
+Create a custom environment with optional compiler and Python constraints. By default, creates an environment that will install dependencies of `geosgcm`. Use `--spec` to specify a different package.
 
 **macOS Smart Compiler Defaults:**
 On macOS, when you specify `--compiler gcc@X`, the script automatically uses:
@@ -150,11 +150,13 @@ This is the recommended best practice on macOS for optimal performance and compa
 ./bootstrap_spack.py --spack mathomp4 env-create --auto-name --python 3.11
 # Creates: geos-py311
 
-# Dependency-only workflow (for developing against geosgcm/mapl/etc)
+# Dependency-only workflow (for developing against geosgcm/mapl/etc) - DEFAULT
 ./bootstrap_spack.py --spack mathomp4 env-create --auto-name \
-  --compiler gcc@15 --python 3.12 --spec geosgcm
-# Creates environment with geosgcm spec, then use: spack install --only dependencies
+  --compiler gcc@15 --python 3.12
+# Creates environment for geosgcm dependencies (default spec)
+# Then use: spack install --only dependencies
 
+# Use a different spec (e.g., mapl instead of geosgcm)
 ./bootstrap_spack.py --spack mathomp4 env-create --name mapl-dev \
   --compiler gcc@15 --spec mapl
 # Creates environment for building MAPL dependencies
@@ -276,10 +278,14 @@ When using `--auto-name` with `env-create`, the environment name is generated fr
 
 ## Dependency-Only Development Workflow
 
-If you're developing a package like `geosgcm` or `mapl` and want to build only its dependencies (not the package itself), use the `--spec` option:
+**By default, all environments are created with `geosgcm` as the spec**, optimized for the workflow where you install dependencies through Spack and build the main package from your local source. Use `--spec` to specify a different package (e.g., `mapl`).
 
 ```bash
-# Create environment for developing geosgcm
+# Create environment for developing geosgcm (default)
+./bootstrap_spack.py --spack mathomp4 env-create --auto-name \
+  --compiler gcc@15 --python 3.12
+
+# Or explicitly specify the spec
 ./bootstrap_spack.py --spack mathomp4 env-create --auto-name \
   --compiler gcc@15 --python 3.12 --spec geosgcm
 
@@ -295,17 +301,20 @@ cd ~/GEOSgcm
 make install
 ```
 
-**What `--spec` does:**
-- Replaces the default starter package list with your specified package (e.g., `geosgcm`, `mapl`)
-- Automatically adds compiler environment variables (`CC`, `CXX`, `FC`) to work around [Spack bug #51855](https://github.com/spack/spack/issues/51855)
-- Enables the `spack install --only dependencies` workflow
+**The output will tell you which spec is being used:**
+```
+This environment will install dependencies of: geosgcm
+```
 
-**Default behavior (without `--spec`):**
-- Installs individual packages: python, py-numpy, openmpi, esmf, gftl, pfunit, etc.
-- Suitable for general development environment setup
+**What happens:**
+- The environment contains a single spec: `geosgcm` (or your chosen package)
+- Compiler constraints are applied via the spec syntax: `%[when='%c'] c=apple-clang %[when='%cxx'] cxx=apple-clang %[when='%fortran'] fortran=gcc@15`
+- These constraints propagate to all dependencies automatically
+- Compiler environment variables (`CC`, `CXX`, `FC`) are added to work around [Spack bug #51855](https://github.com/spack/spack/issues/51855)
+- Running `spack install --only dependencies` installs all dependencies without building the main package
 
-**Common specs for `--spec`:**
-- `geosgcm` - GEOS GCM and all dependencies
+**Common specs:**
+- `geosgcm` (default) - GEOSgcm and all dependencies
 - `mapl` - MAPL library and dependencies
 - `esmf+netcdf` - ESMF with NetCDF support
 - Any valid Spack spec
@@ -330,13 +339,15 @@ The script automatically handles this when you specify `--compiler gcc@X`:
 
 The generated `spack.yaml` will contain:
 ```yaml
-packages:
-  all:
-    require:
-      - '%gcc@15 languages:=fortran'
+specs:
+  - geosgcm %[when='%c'] c=apple-clang %[when='%cxx'] cxx=apple-clang %[when='%fortran'] fortran=gcc@15
 ```
 
-This tells Spack to use gcc@15 only for Fortran, allowing it to choose the default (apple-clang) for C/C++.
+This tells Spack to:
+- Use `apple-clang` for all C compilation
+- Use `apple-clang` for all C++ compilation  
+- Use `gcc@15` for all Fortran compilation
+- Apply these constraints to `geosgcm` and all its dependencies
 
 **Override the smart defaults:**
 
@@ -374,7 +385,7 @@ source ~/spack-mathomp4/share/spack/setup-env.sh
 spack env list
 spack env activate geos
 spack concretize
-spack install
+spack install --only dependencies
 ```
 
 ### Add Environment for Different Compiler
@@ -384,7 +395,7 @@ spack install
 source ~/spack-mathomp4/share/spack/setup-env.sh
 spack env activate geos-appleclang17-py311
 spack concretize
-spack install
+spack install --only dependencies
 ```
 
 ### Testing a Fork Before Committing
@@ -419,12 +430,16 @@ This backs up your old config, removes it, then regenerates everything.
 
 ### Developing Against GEOSgcm or MAPL
 
-For local development where you want to build dependencies but compile the main package yourself:
+**Note:** This is now the default behavior. All environments are created with a spec (default: `geosgcm`) optimized for the dependency-only workflow.
 
 ```bash
-# Create environment with geosgcm dependencies
+# Create environment for developing geosgcm (default spec)
 ./bootstrap_spack.py --spack mathomp4 env-create --auto-name \
-  --compiler gcc@15 --python 3.12 --spec geosgcm
+  --compiler gcc@15 --python 3.12
+
+# For a different package, use --spec
+./bootstrap_spack.py --spack mathomp4 env-create --auto-name \
+  --compiler gcc@15 --python 3.12 --spec mapl
 
 # Activate and build dependencies
 source ~/spack-mathomp4/share/spack/setup-env.sh
@@ -437,7 +452,7 @@ cd ~/GEOSgcm
 make install
 ```
 
-The `--spec` option automatically adds compiler environment variables to work around a Spack bug, so your builds will find the correct compilers.
+Compiler environment variables are automatically added to work around a Spack bug, so your builds will find the correct compilers.
 
 ## Dry-run Mode
 
@@ -541,7 +556,7 @@ This occurs when using `--compiler apple-clang@17` alone. Apple's compiler suite
 
 ### Compiler environment variables with --spec
 
-When using `--spec`, the script automatically adds `CC`, `CXX`, and `FC` environment variables to your `spack.yaml`. This is a workaround for [Spack bug #51855](https://github.com/spack/spack/issues/51855) which affects the `spack install --only dependencies` workflow.
+When creating environments, the script automatically adds `CC`, `CXX`, and `FC` environment variables to your `spack.yaml` when compiler constraints are specified. This is a workaround for [Spack bug #51855](https://github.com/spack/spack/issues/51855) which affects the `spack install --only dependencies` workflow.
 
 You'll see output like:
 ```
