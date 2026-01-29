@@ -761,9 +761,10 @@ def create_env(
             lines.append(f"      require: '{py_spec}'")
         packages_block = "\n" + "\n".join(lines) + "\n"
 
-    # For custom spec workflow, add compiler env vars to work around Spack bug #51855
+    # Add compiler env vars to work around Spack bug #51855
+    # This helps Spack find the correct compilers in various workflows
     env_vars_block = ""
-    if custom_spec and has_compiler_constraint:
+    if has_compiler_constraint:
         compiler_paths = find_system_compiler_paths(c_spec, fortran_spec)
         if compiler_paths:
             eprint("==> Adding compiler env vars (workaround for Spack bug #51855):")
