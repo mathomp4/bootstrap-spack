@@ -668,11 +668,11 @@ def create_env(
     # Validate apple-clang usage
     if compiler and 'apple-clang' in compiler and not (compiler_c or compiler_fortran):
         raise SystemExit(
-            f"ERROR: apple-clang does not include a Fortran compiler.\n"
-            f"For Fortran support, use one of these options:\n"
-            f"  1. --compiler gcc@15 (recommended: auto-uses apple-clang for C/C++, gcc for Fortran)\n"
-            f"  2. --compiler-c apple-clang@17 --compiler-fortran gcc@15 (explicit control)\n"
-            f"  3. --compiler-fortran gcc@15 (uses default apple-clang for C/C++, gcc for Fortran)"
+            "ERROR: apple-clang does not include a Fortran compiler.\n"
+            "For Fortran support, use one of these options:\n"
+            "  1. --compiler gcc@15 (recommended: auto-uses apple-clang for C/C++, gcc for Fortran)\n"
+            "  2. --compiler-c apple-clang@17 --compiler-fortran gcc@15 (explicit control)\n"
+            "  3. --compiler-fortran gcc@15 (uses default apple-clang for C/C++, gcc for Fortran)"
         )
 
     # Determine compiler strategy
@@ -685,8 +685,8 @@ def create_env(
         # Explicit overrides - validate apple-clang + fortran combination
         if compiler_fortran and 'apple-clang' in compiler_fortran:
             raise SystemExit(
-                f"ERROR: apple-clang does not include a Fortran compiler.\n"
-                f"Use gcc, gfortran, or nag for --compiler-fortran."
+                "ERROR: apple-clang does not include a Fortran compiler.\n"
+                "Use gcc, gfortran, or nag for --compiler-fortran."
             )
         c_spec = compiler_c
         fortran_spec = compiler_fortran
