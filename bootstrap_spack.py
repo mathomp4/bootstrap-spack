@@ -773,6 +773,7 @@ def create_env(
     python: str | None = None,
     sandbox: Path | None = None,
     custom_spec: str | None = None,
+    target: str | None = None,
 ) -> None:
     if env_dir.exists():
         eprint(f"==> Environment already exists: {env_dir}")
@@ -833,8 +834,9 @@ def create_env(
         unify_val = "true"
 
     # Specs: either individual packages or a custom spec for dependency-only workflow
-    # Build compiler constraint suffix if needed (propagates to all dependencies)
+    # Build compiler and target constraint suffix if needed (propagates to all dependencies)
     compiler_suffix = ""
+    target_suffix = f" target={target}" if target else ""
     if c_spec and fortran_spec:
         # Both C/C++ and Fortran specified
         if is_mac_os() and fortran_spec.startswith("gcc"):
@@ -857,13 +859,13 @@ def create_env(
             compiler_suffix = f" %{fortran_spec} languages:=fortran"
 
     if custom_spec:
-        spec_lines = [f"    - {custom_spec}{compiler_suffix}"]
+        spec_lines = [f"    - {custom_spec}{compiler_suffix}{target_suffix}"]
         eprint(
             f"==> Using custom spec '{custom_spec}' (for 'spack install --only dependencies' workflow)"
         )
     else:
         # Default: use geosgcm
-        spec_lines = [f"    - {DEFAULT_SPEC}{compiler_suffix}"]
+        spec_lines = [f"    - {DEFAULT_SPEC}{compiler_suffix}{target_suffix}"]
         eprint(f"==> Using default spec '{DEFAULT_SPEC}'")
     specs = "\n".join(spec_lines)
 
@@ -908,6 +910,7 @@ def create_env(
         eprint(f"[dry-run]   C/C++ compiler: {c_spec or 'default'}")
         eprint(f"[dry-run]   Fortran compiler: {fortran_spec or 'default'}")
         eprint(f"[dry-run]   Python: {python or 'default'}")
+        eprint(f"[dry-run]   Target: {target or 'default'}")
         return
 
     env_dir.mkdir(parents=True, exist_ok=True)
@@ -1072,6 +1075,12 @@ EXAMPLES:
         "Intended for 'spack install --only dependencies' workflow. "
         "Automatically adds CC/CXX/FC env vars (Spack bug #51855 workaround).",
     )
+    p_envc.add_argument(
+        "--target",
+        default=None,
+        help="Spack target architecture (e.g., 'x86_64_v3', 'icelake', 'm1'). "
+        "Constrains all packages to build for this specific microarchitecture.",
+    )
 
     p.set_defaults(cmd="all")
     return p.parse_args(argv)
@@ -1174,11 +1183,13 @@ def main(argv: list[str]) -> int:
         compiler_c = None
         compiler_fortran = None
         python = None
+        target = None
         if cmd == "env-create":
             compiler = getattr(args, "compiler", None)
             compiler_c = getattr(args, "compiler_c", None)
             compiler_fortran = getattr(args, "compiler_fortran", None)
             python = getattr(args, "python", None)
+            target = getattr(args, "target", None)
             custom_spec = getattr(args, "spec", None)
             auto_name = getattr(args, "auto_name", False)
             if auto_name:
@@ -1202,6 +1213,7 @@ def main(argv: list[str]) -> int:
             python=python,
             sandbox=sandbox,
             custom_spec=custom_spec,
+            target=target,
         )
 
         if cmd == "env-create":

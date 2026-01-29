@@ -135,6 +135,10 @@ This is the recommended best practice on macOS for optimal performance and compa
 ./bootstrap_spack.py --spack mathomp4 env-create --auto-name --compiler gcc@15 --python 3.12
 # Creates: geos-gcc15-py312
 
+# With target architecture
+./bootstrap_spack.py --spack mathomp4 env-create --auto-name --compiler gcc@15 --target x86_64_v3
+# Creates: geos-gcc15 optimized for x86_64_v3 microarchitecture
+
 # NOTE: --compiler apple-clang@17 alone will ERROR (no Fortran compiler)
 # Use one of these instead:
 
@@ -160,6 +164,11 @@ This is the recommended best practice on macOS for optimal performance and compa
 ./bootstrap_spack.py --spack mathomp4 env-create --name mapl-dev \
   --compiler gcc@15 --spec mapl
 # Creates environment for building MAPL dependencies
+
+# Specify target architecture for optimized builds
+./bootstrap_spack.py --spack mathomp4 env-create --auto-name \
+  --compiler gcc@15 --python 3.12 --target x86_64_v3
+# Creates: geos-gcc15-py312 with x86_64_v3 optimizations
 ```
 
 ### `reset`
@@ -398,6 +407,17 @@ spack concretize
 spack install --only dependencies
 ```
 
+### Create Environment with Target Architecture
+
+```bash
+./bootstrap_spack.py --spack mathomp4 env-create --auto-name \
+  --compiler gcc@15 --python 3.12 --target x86_64_v3
+source ~/spack-mathomp4/share/spack/setup-env.sh
+spack env activate geos-gcc15-py312
+spack concretize
+spack install --only dependencies
+```
+
 ### Testing a Fork Before Committing
 
 ```bash
@@ -462,6 +482,38 @@ Preview what the script would do without making any changes:
 ./bootstrap_spack.py --dry-run --spack official setup
 ./bootstrap_spack.py --dry-run --sandbox ~/test --spack mathomp4 all
 ```
+
+## Target Architecture
+
+You can specify a target microarchitecture for all packages in an environment using the `--target` option. This is useful for:
+- Building optimized binaries for specific CPU architectures
+- Ensuring compatibility with older systems (e.g., `x86_64_v2`)
+- Maximizing performance on newer systems (e.g., `x86_64_v4`, `icelake`)
+
+```bash
+# Target a specific x86_64 microarchitecture level
+./bootstrap_spack.py --spack mathomp4 env-create --auto-name \
+  --compiler gcc@15 --python 3.12 --target x86_64_v3
+
+# Target Intel Icelake optimizations
+./bootstrap_spack.py --spack mathomp4 env-create --auto-name \
+  --compiler gcc@15 --target icelake
+
+# Target Apple M1/M2 (ARM)
+./bootstrap_spack.py --spack mathomp4 env-create --auto-name \
+  --compiler gcc@15 --target m1
+```
+
+Common target values:
+- `x86_64` - Generic x86_64 (maximum compatibility)
+- `x86_64_v2` - Baseline for modern x86_64 (2009+)
+- `x86_64_v3` - AVX/AVX2 support (2013+)
+- `x86_64_v4` - AVX-512 support (2017+)
+- `icelake`, `skylake`, `haswell` - Intel-specific
+- `zen`, `zen2`, `zen3` - AMD-specific
+- `m1`, `m2` - Apple Silicon
+
+The target constraint applies to all packages in the environment, ensuring consistent optimization levels across your entire build.
 
 ## Configuration Details
 
