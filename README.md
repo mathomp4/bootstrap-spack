@@ -115,6 +115,15 @@ Create the default `geos` starter environment.
 ### `env-create`
 Create a custom environment with optional compiler and Python constraints.
 
+**macOS Smart Compiler Defaults:**
+On macOS, when you specify `--compiler gcc@X`, the script automatically uses:
+- **apple-clang** for C/C++ compilation
+- **gcc@X** for Fortran compilation
+
+This is the recommended best practice on macOS for optimal performance and compatibility. Use `--compiler-c` and `--compiler-fortran` for explicit control.
+
+**Important:** apple-clang does not include a Fortran compiler. Using `--compiler apple-clang@17` will result in an error. For Fortran support, use gcc or gfortran.
+
 ```bash
 # Default environment
 ./bootstrap_spack.py --spack mathomp4 env-create
@@ -122,21 +131,33 @@ Create a custom environment with optional compiler and Python constraints.
 # Custom name
 ./bootstrap_spack.py --spack mathomp4 env-create --name my-project
 
-# With compiler constraint
-./bootstrap_spack.py --spack mathomp4 env-create --name gcc15-env --compiler gcc@15
-
-# With Python constraint
-./bootstrap_spack.py --spack mathomp4 env-create --name py312-env --python 3.12
-
-# Auto-generate name from constraints
+# With compiler constraint (macOS: apple-clang for C/C++, gcc@15 for Fortran)
 ./bootstrap_spack.py --spack mathomp4 env-create --auto-name --compiler gcc@15 --python 3.12
 # Creates: geos-gcc15-py312
 
-./bootstrap_spack.py --spack mathomp4 env-create --auto-name --compiler apple-clang@17
-# Creates: geos-appleclang17
+# NOTE: --compiler apple-clang@17 alone will ERROR (no Fortran compiler)
+# Use one of these instead:
 
+# Explicit compiler control (override macOS smart defaults)
+./bootstrap_spack.py --spack mathomp4 env-create --auto-name \
+  --compiler-c apple-clang@17 --compiler-fortran gcc@15 --python 3.12
+
+# Fortran-only constraint (C/C++ uses default)
+./bootstrap_spack.py --spack mathomp4 env-create --auto-name --compiler-fortran gcc@15
+# Creates: geos-gcc15
+
+# Python constraint only
 ./bootstrap_spack.py --spack mathomp4 env-create --auto-name --python 3.11
 # Creates: geos-py311
+
+# Dependency-only workflow (for developing against geosgcm/mapl/etc)
+./bootstrap_spack.py --spack mathomp4 env-create --auto-name \
+  --compiler gcc@15 --python 3.12 --spec geosgcm
+# Creates environment with geosgcm spec, then use: spack install --only dependencies
+
+./bootstrap_spack.py --spack mathomp4 env-create --name mapl-dev \
+  --compiler gcc@15 --spec mapl
+# Creates environment for building MAPL dependencies
 ```
 
 ### `reset`
@@ -227,11 +248,17 @@ spack install
 
 **Cleanup:**
 
-Simply delete the sandbox directory when done:
+Deactivate any active environment first, then delete the sandbox directory:
 
 ```bash
+# If you have an environment activated
+spack env deactivate
+
+# Then remove the sandbox
 rm -rf ~/spack-testing
 ```
+
+**Important:** Always deactivate Spack environments before removing the sandbox or environment directories to avoid shell state issues.
 
 ## Environment Auto-naming
 
@@ -245,7 +272,88 @@ When using `--auto-name` with `env-create`, the environment name is generated fr
 | `apple-clang@17` | `3.11` | `geos-appleclang17-py311` |
 | `nag@7.1` | — | `geos-nag7` |
 
-This makes it easy to manage multiple environments with different toolchains.
+**Note:** On macOS, when using `--compiler gcc@X`, the script intelligently uses apple-clang for C/C++ and gcc for Fortran, but the environment name reflects the Fortran compiler (gcc@X) since that's the primary differentiator.
+
+## Dependency-Only Development Workflow
+
+If you're developing a package like `geosgcm` or `mapl` and want to build only its dependencies (not the package itself), use the `--spec` option:
+
+```bash
+# Create environment for developing geosgcm
+./bootstrap_spack.py --spack mathomp4 env-create --auto-name \
+  --compiler gcc@15 --python 3.12 --spec geosgcm
+
+# Activate and install dependencies only
+export SPACK_USER_CONFIG_PATH="$HOME/.spack"  # or sandbox path
+source ~/spack-mathomp4/share/spack/setup-env.sh
+spack env activate geos-gcc15-py312
+spack concretize
+spack install --only dependencies
+
+# Now build geosgcm from your local source
+cd ~/GEOSgcm
+make install
+```
+
+**What `--spec` does:**
+- Replaces the default starter package list with your specified package (e.g., `geosgcm`, `mapl`)
+- Automatically adds compiler environment variables (`CC`, `CXX`, `FC`) to work around [Spack bug #51855](https://github.com/spack/spack/issues/51855)
+- Enables the `spack install --only dependencies` workflow
+
+**Default behavior (without `--spec`):**
+- Installs individual packages: python, py-numpy, openmpi, esmf, gftl, pfunit, etc.
+- Suitable for general development environment setup
+
+**Common specs for `--spec`:**
+- `geosgcm` - GEOS GCM and all dependencies
+- `mapl` - MAPL library and dependencies
+- `esmf+netcdf` - ESMF with NetCDF support
+- Any valid Spack spec
+
+## Compiler Configuration on macOS
+
+On macOS, the recommended practice is to use:
+- **apple-clang** for C/C++ (better optimization for Apple Silicon)
+- **gcc** for Fortran (better Fortran support)
+
+The script automatically handles this when you specify `--compiler gcc@X`:
+
+```bash
+# This command:
+./bootstrap_spack.py --spack mathomp4 env-create --auto-name --compiler gcc@15
+
+# Automatically creates an environment with:
+# - apple-clang for C/C++ compilation
+# - gcc@15 for Fortran compilation
+# - Environment name: geos-gcc15
+```
+
+The generated `spack.yaml` will contain:
+```yaml
+packages:
+  all:
+    require:
+      - '%gcc@15 languages:=fortran'
+```
+
+This tells Spack to use gcc@15 only for Fortran, allowing it to choose the default (apple-clang) for C/C++.
+
+**Override the smart defaults:**
+
+If you need explicit control over compilers:
+
+```bash
+# Explicit apple-clang + gcc split (recommended on macOS)
+./bootstrap_spack.py --spack mathomp4 env-create \
+  --compiler-c apple-clang@17 --compiler-fortran gcc@15
+
+# Pure gcc for everything (not recommended on macOS, but works)
+./bootstrap_spack.py --spack mathomp4 env-create \
+  --compiler-c gcc@15 --compiler-fortran gcc@15
+
+# NOTE: This will ERROR because apple-clang has no Fortran compiler:
+# ./bootstrap_spack.py --spack mathomp4 env-create --compiler apple-clang@17
+```
 
 ## Common Workflows
 
@@ -294,7 +402,8 @@ source "/tmp/test-spack/spack-myusername/share/spack/setup-env.sh"
 spack env activate geos-gcc15
 spack concretize
 
-# Clean up when done
+# Clean up when done (deactivate first!)
+spack env deactivate
 rm -rf /tmp/test-spack
 ```
 
@@ -307,6 +416,28 @@ If you need to start fresh with configuration:
 ```
 
 This backs up your old config, removes it, then regenerates everything.
+
+### Developing Against GEOSgcm or MAPL
+
+For local development where you want to build dependencies but compile the main package yourself:
+
+```bash
+# Create environment with geosgcm dependencies
+./bootstrap_spack.py --spack mathomp4 env-create --auto-name \
+  --compiler gcc@15 --python 3.12 --spec geosgcm
+
+# Activate and build dependencies
+source ~/spack-mathomp4/share/spack/setup-env.sh
+spack env activate geos-gcc15-py312
+spack concretize
+spack install --only dependencies
+
+# Now your local GEOSgcm build can use these dependencies
+cd ~/GEOSgcm
+make install
+```
+
+The `--spec` option automatically adds compiler environment variables to work around a Spack bug, so your builds will find the correct compilers.
 
 ## Dry-run Mode
 
@@ -359,6 +490,10 @@ export SPACK_USER_CONFIG_PATH="$HOME/spack-testing/.spack"
 This can happen with complex constraints. The script now uses `unify: false` when Python constraints are specified, which should solve in seconds. If you created an environment with the old settings, recreate it:
 
 ```bash
+# Deactivate if currently active
+spack env deactivate
+
+# Remove and recreate
 rm -rf ~/spack-envs/your-env-name
 ./bootstrap_spack.py --spack mathomp4 env-create --auto-name --compiler gcc@15 --python 3.12
 ```
@@ -376,6 +511,47 @@ If not set up, see [GitHub's SSH key documentation](https://docs.github.com/en/a
 ### Homebrew not found
 
 The script will guide you to install Homebrew in a non-admin location. Follow the instructions in the error message.
+
+### Mixed compilers in concretization output
+
+**This is expected and correct behavior on macOS!**
+
+When you see output like:
+```
+%c,cxx=apple-clang@17.0.0 %fortran=gcc@15.2.0
+```
+
+This means:
+- C and C++ are compiled with apple-clang (optimal for macOS)
+- Fortran is compiled with gcc (better Fortran support)
+
+This is the recommended configuration and what the script sets up automatically when you use `--compiler gcc@X` on macOS.
+
+### apple-clang error with --compiler
+
+If you see:
+```
+ERROR: apple-clang does not include a Fortran compiler.
+```
+
+This occurs when using `--compiler apple-clang@17` alone. Apple's compiler suite does not include a Fortran compiler. Use one of these alternatives:
+- `--compiler gcc@15` (recommended: auto-uses apple-clang for C/C++, gcc for Fortran)
+- `--compiler-c apple-clang@17 --compiler-fortran gcc@15` (explicit control)
+- `--compiler-fortran gcc@15` (uses default apple-clang for C/C++, gcc for Fortran)
+
+### Compiler environment variables with --spec
+
+When using `--spec`, the script automatically adds `CC`, `CXX`, and `FC` environment variables to your `spack.yaml`. This is a workaround for [Spack bug #51855](https://github.com/spack/spack/issues/51855) which affects the `spack install --only dependencies` workflow.
+
+You'll see output like:
+```
+==> Adding compiler env vars (workaround for Spack bug #51855):
+    CC=/usr/bin/clang
+    CXX=/usr/bin/clang++
+    FC=/opt/homebrew/bin/gfortran-15
+```
+
+This ensures your builds use the correct system compilers, not Spack wrapper scripts.
 
 ## Advanced Options
 
