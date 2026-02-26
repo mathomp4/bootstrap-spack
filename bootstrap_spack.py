@@ -70,6 +70,12 @@ USAGE EXAMPLES:
   # Create environment with custom name and compiler constraint:
   ./bootstrap_spack.py --spack mathomp4 env-create --name my-env --compiler apple-clang@17
 
+    # Print resolved target and continue environment creation:
+    ./bootstrap_spack.py --spack mathomp4 env-create --print-effective-target --auto-name --compiler gcc@15
+
+    # Print resolved target only (no setup/env changes):
+    ./bootstrap_spack.py --spack mathomp4 env-create --print-effective-target-only
+
   # Create environment with Python version constraint only:
   ./bootstrap_spack.py --spack mathomp4 env-create --auto-name --python 3.11
   # Result: creates environment named "geos-py311"
@@ -92,6 +98,8 @@ KEY DESIGN NOTES:
   rather than `spack config add` to handle array-of-dicts safely.
 - Environments are created under ~/spack-envs (configured via environments_root).
 - The --auto-name flag generates environment names from toolchain specs.
+- Target precedence is: explicit --target, then auto target on Apple Silicon
+    based on min(host target, Apple-clang capability).
 """
 
 from __future__ import annotations
@@ -99,6 +107,8 @@ from __future__ import annotations
 import argparse
 import datetime as _dt
 import os
+import platform
+import re
 import shlex
 import subprocess
 import sys
@@ -237,6 +247,124 @@ def is_mac_os() -> bool:
 
 def is_linux() -> bool:
     return sys.platform == platforms["Linux"]
+
+
+def parse_apple_silicon_target_generation(target: str | None) -> int | None:
+    """Parse Spack Apple Silicon targets like m1, m2, m3 -> 1, 2, 3."""
+    if not target:
+        return None
+    match = re.fullmatch(r"m(\d+)", target.strip().lower())
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def apple_clang_max_target(clang_major: int) -> str:
+    """Conservative Apple-clang target cap for Apple Silicon generations."""
+    if clang_major >= 17:
+        return "m3"
+    if clang_major == 16:
+        return "m2"
+    return "m1"
+
+
+def detect_apple_clang_major(*, dry_run: bool) -> int | None:
+    if dry_run:
+        return None
+    clang = shutil_which("clang")
+    if not clang:
+        return None
+    res = run([clang, "--version"], dry_run=False, check=False)
+    if res.returncode != 0:
+        return None
+    match = re.search(r"Apple clang version\s+(\d+)", res.stdout)
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def detect_spack_host_target(
+    spack_root: str, *, dry_run: bool, sandbox: Path | None = None
+) -> str | None:
+    if dry_run:
+        return None
+
+    # Prefer spack from selected spack_root if it exists.
+    setup_env = Path(spack_root) / "share" / "spack" / "setup-env.sh"
+    if setup_env.exists():
+        res = spack_run(
+            spack_root, ["arch", "-t"], dry_run=False, check=False, sandbox=sandbox
+        )
+        if res.returncode == 0:
+            lines = [line.strip() for line in res.stdout.splitlines() if line.strip()]
+            if lines:
+                return lines[-1]
+
+    # Fallback to a spack command already available in PATH.
+    if have("spack"):
+        res = run(["spack", "arch", "-t"], dry_run=False, check=False)
+        if res.returncode == 0:
+            lines = [line.strip() for line in res.stdout.splitlines() if line.strip()]
+            if lines:
+                return lines[-1]
+
+    # Last fallback on Apple Silicon if spack isn't available yet.
+    machine = platform.machine().lower()
+    if machine in ("arm64", "aarch64"):
+        return "m1"
+
+    return None
+
+
+def resolve_effective_target(
+    spack_root: str,
+    requested_target: str | None,
+    *,
+    dry_run: bool,
+    sandbox: Path | None = None,
+) -> str | None:
+    """
+    Resolve target precedence:
+      1) explicit --target
+      2) auto target from min(host_target, apple-clang cap) on Apple Silicon
+      3) None (let Spack default)
+    """
+    if not is_mac_os():
+        return requested_target
+
+    host_target = detect_spack_host_target(spack_root, dry_run=dry_run, sandbox=sandbox)
+    clang_major = detect_apple_clang_major(dry_run=dry_run)
+
+    if requested_target:
+        req_gen = parse_apple_silicon_target_generation(requested_target)
+        if clang_major is not None and req_gen is not None:
+            cap_target = apple_clang_max_target(clang_major)
+            cap_gen = parse_apple_silicon_target_generation(cap_target)
+            if cap_gen is not None and req_gen > cap_gen:
+                raise SystemExit(
+                    f"ERROR: requested --target {requested_target} exceeds Apple clang {clang_major} capability ({cap_target})."
+                )
+        return requested_target
+
+    host_gen = parse_apple_silicon_target_generation(host_target)
+    if clang_major is None or host_gen is None:
+        return None
+
+    cap_target = apple_clang_max_target(clang_major)
+    cap_gen = parse_apple_silicon_target_generation(cap_target)
+    if cap_gen is None:
+        return None
+
+    selected_target = f"m{min(host_gen, cap_gen)}"
+    if selected_target != host_target:
+        eprint(
+            f"==> Auto target: host={host_target}, Apple clang={clang_major} -> using target={selected_target}"
+        )
+    else:
+        eprint(
+            f"==> Auto target: host={host_target}, Apple clang={clang_major} -> using host target"
+        )
+    return selected_target
 
 
 def run(
@@ -948,6 +1076,9 @@ EXAMPLES:
   
   %(prog)s --spack mathomp4 env-create --auto-name --compiler gcc@15 --python 3.12
       Create environment named 'geos-gcc15-py312' with compiler and Python constraints
+
+  %(prog)s --spack official env-create --print-effective-target-only
+      Print resolved target and exit without environment creation
   
   %(prog)s --spack fork --fork jcsda setup
       Set up a custom fork (jcsda/spack and jcsda/spack-packages)
@@ -1025,6 +1156,9 @@ Use --auto-name to generate environment names from specs (e.g., geos-gcc15-py312
 On macOS, when --compiler gcc@X is specified, the script automatically uses apple-clang
 for C/C++ and gcc for Fortran (best practice). Use --compiler-c and --compiler-fortran
 for explicit control.
+
+If --target is omitted on Apple Silicon, the script auto-selects a conservative target
+based on host architecture and Apple clang compatibility.
         """,
         epilog="""
 EXAMPLES:
@@ -1045,6 +1179,12 @@ EXAMPLES:
   
   %(prog)s --spack mathomp4 env-create --compiler-c apple-clang@17 --compiler-fortran gcc@15
       Explicit control: apple-clang for C/C++, gcc for Fortran
+
+  %(prog)s --spack mathomp4 env-create --print-effective-target --auto-name --compiler gcc@15
+      Print resolved target, then create environment
+
+  %(prog)s --spack mathomp4 env-create --print-effective-target-only
+      Print resolved target and exit (no repo/config/env changes)
         """,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -1093,7 +1233,19 @@ EXAMPLES:
         "--target",
         default=None,
         help="Spack target architecture (e.g., 'x86_64_v3', 'icelake', 'm1'). "
-        "Constrains all packages to build for this specific microarchitecture.",
+        "Constrains all packages to build for this specific microarchitecture. "
+        "On Apple Silicon, if omitted, target is auto-selected from host+compiler compatibility. "
+        "If provided, values above Apple clang capability are rejected.",
+    )
+    p_envc.add_argument(
+        "--print-effective-target",
+        action="store_true",
+        help="Print the resolved target used for environment creation (after auto-detection/validation).",
+    )
+    p_envc.add_argument(
+        "--print-effective-target-only",
+        action="store_true",
+        help="Print the resolved target and exit without creating or modifying an environment.",
     )
 
     p.set_defaults(cmd="all")
@@ -1141,6 +1293,18 @@ def main(argv: list[str]) -> int:
         eprint(f"  ENVIRONMENTS_ROOT   = {sandbox / 'spack-envs'}")
 
     cmd = args.cmd
+
+    if cmd == "env-create" and getattr(args, "print_effective_target_only", False):
+        target = resolve_effective_target(
+            spack_root,
+            getattr(args, "target", None),
+            dry_run=dry_run,
+            sandbox=sandbox,
+        )
+        eprint(
+            f"==> Effective target: {target if target else 'default (Spack host target)'}"
+        )
+        return 0
 
     if cmd in ("all", "brew", "setup"):
         if is_mac_os():
@@ -1205,7 +1369,14 @@ def main(argv: list[str]) -> int:
             compiler_fortran = getattr(args, "compiler_fortran", None)
             python = getattr(args, "python", None)
             python_optimizations = getattr(args, "python_optimizations", False)
-            target = getattr(args, "target", None)
+            target = resolve_effective_target(
+                spack_root,
+                getattr(args, "target", None),
+                dry_run=dry_run,
+                sandbox=sandbox,
+            )
+            if getattr(args, "print_effective_target", False):
+                eprint(f"==> Effective target: {target if target else 'default (Spack host target)'}")
             custom_spec = getattr(args, "spec", None)
             auto_name = getattr(args, "auto_name", False)
             if auto_name:

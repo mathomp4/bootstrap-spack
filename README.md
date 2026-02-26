@@ -13,6 +13,8 @@ A macOS-focused bootstrap tool for [Spack](https://github.com/spack/spack) >= 1.
   - Forks: `~/spack-<fork>` and `~/spack-packages-<fork>`
 - **Automated environment creation** with compiler and Python version constraints
 - **Auto-naming**: Generate environment names from toolchain specs (e.g., `geos-gcc15-py312`)
+- **Apple Silicon target auto-resolution**: Chooses a safe default target from host architecture and Apple clang capability
+- **Target query modes**: Print resolved target during `env-create` or query it without making changes
 - **Sandbox mode**: Isolate installations for testing without affecting your main setup
 - **Modular subcommands**: Run individual setup steps or full bootstrap
 - **Smart concretizer settings**: Optimizes unification strategy based on constraints
@@ -115,6 +117,17 @@ Create the default `geos` starter environment with `geosgcm` spec.
 ### `env-create`
 Create a custom environment with optional compiler and Python constraints. By default, creates an environment that will install dependencies of `geosgcm`. Use `--spec` to specify a different package.
 
+**Target Resolution (Apple Silicon):**
+- If you pass `--target`, that value is used (after validation).
+- If you omit `--target`, the script auto-selects a conservative target using:
+  - host target from `spack arch -t`
+  - Apple clang capability cap (current mapping: clang 17→`m3`, clang 16→`m2`, older→`m1`)
+- If explicit `--target` exceeds Apple clang capability (e.g., `--target m3` with clang 16), the script exits with a clear error.
+
+**Target Query Flags:**
+- `--print-effective-target`: Print resolved target and continue normal `env-create`.
+- `--print-effective-target-only`: Print resolved target and exit immediately (no setup/config/environment changes).
+
 **macOS Smart Compiler Defaults:**
 On macOS, when you specify `--compiler gcc@X`, the script automatically uses:
 - **apple-clang** for C/C++ compilation
@@ -138,6 +151,13 @@ This is the recommended best practice on macOS for optimal performance and compa
 # With target architecture
 ./bootstrap_spack.py --spack mathomp4 env-create --auto-name --compiler gcc@15 --target x86_64_v3
 # Creates: geos-gcc15 optimized for x86_64_v3 microarchitecture
+
+# Print effective target and continue env creation
+./bootstrap_spack.py --spack mathomp4 env-create --auto-name --compiler gcc@15 \
+  --print-effective-target
+
+# Print effective target only (no environment changes)
+./bootstrap_spack.py --spack mathomp4 env-create --print-effective-target-only
 
 # With Python optimizations (PGO for better runtime performance)
 ./bootstrap_spack.py --spack mathomp4 env-create --auto-name --compiler gcc@15 --python 3.12 --python-optimizations
@@ -523,6 +543,13 @@ You can specify a target microarchitecture for all packages in an environment us
 - Ensuring compatibility with older systems (e.g., `x86_64_v2`)
 - Maximizing performance on newer systems (e.g., `x86_64_v4`, `icelake`)
 
+On Apple Silicon, if `--target` is not provided, the script automatically chooses a conservative default based on host architecture and Apple clang compatibility. This avoids invalid defaults when host hardware is newer than your installed Apple clang.
+
+Target precedence in `env-create`:
+1. Explicit `--target`
+2. Auto target (Apple Silicon only)
+3. Spack default/host target
+
 ```bash
 # Target a specific x86_64 microarchitecture level
 ./bootstrap_spack.py --spack mathomp4 env-create --auto-name \
@@ -535,6 +562,9 @@ You can specify a target microarchitecture for all packages in an environment us
 # Target Apple M1/M2 (ARM)
 ./bootstrap_spack.py --spack mathomp4 env-create --auto-name \
   --compiler gcc@15 --target m1
+
+# Query target only (fast, no setup/env changes)
+./bootstrap_spack.py --spack official env-create --print-effective-target-only
 ```
 
 Common target values:
@@ -544,7 +574,7 @@ Common target values:
 - `x86_64_v4` - AVX-512 support (2017+)
 - `icelake`, `skylake`, `haswell` - Intel-specific
 - `zen`, `zen2`, `zen3` - AMD-specific
-- `m1`, `m2` - Apple Silicon
+- `m1`, `m2`, `m3` - Apple Silicon
 
 The target constraint applies to all packages in the environment, ensuring consistent optimization levels across your entire build.
 
