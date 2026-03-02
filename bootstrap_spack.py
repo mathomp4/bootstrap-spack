@@ -143,6 +143,75 @@ EXTERNAL_FIND_EXCLUDES = [
 DEFAULT_SPEC = "geosgcm"
 
 
+def spack_user_cfg_dir_from_env(sandbox: Path | None = None) -> Path:
+    """Return the user config directory path without invoking spack."""
+    if sandbox:
+        return sandbox / ".spack"
+    cfg = os.environ.get("SPACK_USER_CONFIG_PATH")
+    if cfg:
+        return Path(cfg)
+    return Path.home() / ".spack"
+
+
+def resolve_concrete_compiler_spec(spec: str, packages_yaml: Path | None = None) -> str:
+    """
+    Resolve a potentially partial compiler spec (e.g., 'gcc@15') to the concrete
+    version found in packages.yaml (e.g., 'gcc@15.2.0').
+
+    Spack v1 requires the fortran/c/cxx compiler references in specs to be
+    either external (concrete) or fully versioned. A partial version like 'gcc@15'
+    is treated as a version range and fails concretization with:
+      "Only external, or concrete, compilers are allowed for the fortran language"
+
+    If no match is found, returns the original spec unchanged.
+    """
+    if not spec or "@" not in spec:
+        return spec
+
+    name, ver = spec.split("@", 1)
+    # Already fully concrete (has at least two dots, e.g., 15.2.0)
+    if ver.count(".") >= 2:
+        return spec
+
+    # Try to find a matching concrete version in packages.yaml
+    if packages_yaml is None or not packages_yaml.exists():
+        return spec
+
+    try:
+        import re as _re
+
+        text = packages_yaml.read_text()
+        # Look for lines like: - spec: gcc@15.2.0 ...
+        pattern = _re.compile(
+            r"spec:\s*" + _re.escape(name) + r"@(\d+\.\d+\.\d+[^\s]*)"
+        )
+        # Find all matches, pick the one whose major version matches
+        ver_major = ver.split(".")[0]
+        candidates = []
+        for m in pattern.finditer(text):
+            full_ver = m.group(1)
+            if full_ver.startswith(ver_major + "."):
+                candidates.append(full_ver)
+        if len(candidates) == 1:
+            resolved = f"{name}@{candidates[0]}"
+            eprint(f"==> Resolved compiler spec: {spec} -> {resolved}")
+            return resolved
+        elif len(candidates) > 1:
+            # Multiple matches — pick the highest
+            candidates.sort(
+                key=lambda v: [int(x) for x in v.split(".")[:3] if x.isdigit()]
+            )
+            resolved = f"{name}@{candidates[-1]}"
+            eprint(
+                f"==> Resolved compiler spec (multiple matches, picked highest): {spec} -> {resolved}"
+            )
+            return resolved
+    except Exception:
+        pass
+
+    return spec
+
+
 def find_system_compiler_paths(
     c_spec: str | None, fortran_spec: str | None
 ) -> dict[str, str]:
@@ -328,6 +397,11 @@ def resolve_effective_target(
       1) explicit --target
       2) auto target from min(host_target, apple-clang cap) on Apple Silicon
       3) None (let Spack default)
+
+    Always returns the resolved target (or None if not on Apple Silicon / not
+    determinable). Use resolve_packages_all_target() when you only want the
+    target if it actually needs to be written to config (i.e. explicit or
+    forced downgrade).
     """
     if not is_mac_os():
         return requested_target
@@ -365,6 +439,54 @@ def resolve_effective_target(
             f"==> Auto target: host={host_target}, Apple clang={clang_major} -> using host target"
         )
     return selected_target
+
+
+def resolve_packages_all_target(
+    spack_root: str,
+    requested_target: str | None,
+    *,
+    dry_run: bool,
+    sandbox: Path | None = None,
+) -> str | None:
+    """
+    Return a target to write to packages:all:target only when necessary:
+      - explicit --target was passed, OR
+      - Apple clang capability forced a downgrade below the host target.
+
+    Returns None when the host target is already compatible (no override needed),
+    so we don't pollute packages.yaml with a redundant constraint.
+    """
+    if not is_mac_os():
+        return requested_target
+
+    # Explicit request: always honour it (resolve_effective_target validates it)
+    if requested_target:
+        return resolve_effective_target(
+            spack_root, requested_target, dry_run=dry_run, sandbox=sandbox
+        )
+
+    host_target = detect_spack_host_target(spack_root, dry_run=dry_run, sandbox=sandbox)
+    clang_major = detect_apple_clang_major(dry_run=dry_run)
+
+    host_gen = parse_apple_silicon_target_generation(host_target)
+    if clang_major is None or host_gen is None:
+        return None
+
+    cap_target = apple_clang_max_target(clang_major)
+    cap_gen = parse_apple_silicon_target_generation(cap_target)
+    if cap_gen is None:
+        return None
+
+    if cap_gen < host_gen:
+        # Downgrade required — write target to config
+        selected_target = f"m{cap_gen}"
+        eprint(
+            f"==> Target downgrade required: host={host_target}, Apple clang={clang_major} cap={cap_target} -> writing target={selected_target} to packages.yaml"
+        )
+        return selected_target
+
+    # No downgrade needed — let Spack use its default
+    return None
 
 
 def run(
@@ -629,7 +751,8 @@ def ensure_repos(
         "git@github.com:GMAO-SI-Team/geosesm-spack.git", geosesm_dir, dry_run=dry_run
     )
 
-    user_cfg = spack_user_cfg_dir(spack_root, dry_run=dry_run, sandbox=sandbox)
+    user_cfg = spack_user_cfg_dir_from_env(sandbox)
+    user_cfg.mkdir(parents=True, exist_ok=True)
     repos_yaml = user_cfg / "repos.yaml"
     eprint(f"==> Writing {repos_yaml}")
     content = f"""repos:
@@ -784,7 +907,11 @@ print("ok")
 
 
 def ensure_config(
-    spack_root: str, *, dry_run: bool, sandbox: Path | None = None
+    spack_root: str,
+    *,
+    dry_run: bool,
+    sandbox: Path | None = None,
+    requested_target: str | None = None,
 ) -> None:
     eprint("==> Setting build_jobs=6")
     spack_run(
@@ -836,7 +963,32 @@ def ensure_config(
             spack_root, dry_run=dry_run, brew_prefix=brew_prefix, sandbox=sandbox
         )
 
-    user_cfg = spack_user_cfg_dir(spack_root, dry_run=dry_run, sandbox=sandbox)
+    user_cfg = spack_user_cfg_dir_from_env(sandbox)
+    user_cfg.mkdir(parents=True, exist_ok=True)
+
+    # Write packages:all:target if a target override is needed (explicit request
+    # or Apple clang forced a downgrade below the host target).
+    packages_all_target = resolve_packages_all_target(
+        spack_root, requested_target, dry_run=dry_run, sandbox=sandbox
+    )
+    if packages_all_target:
+        eprint(
+            f"==> Writing packages:all:target: [{packages_all_target}] to packages.yaml"
+        )
+        spack_run(
+            spack_root,
+            [
+                "config",
+                "--scope",
+                "user",
+                "add",
+                f"packages:all:target:[{packages_all_target}]",
+            ],
+            dry_run=dry_run,
+            check=False,
+            sandbox=sandbox,
+        )
+
     concretizer_yaml = user_cfg / "concretizer.yaml"
     eprint(f"==> Writing concretizer.yaml (reuse: false) -> {concretizer_yaml}")
     content = "concretizer:\n  reuse: false\n"
@@ -950,6 +1102,16 @@ def create_env(
             c_spec = compiler
             fortran_spec = compiler
 
+    # Resolve partial compiler specs (e.g. gcc@15) to concrete versions (e.g. gcc@15.2.0).
+    # Spack v1 requires fortran/c/cxx compiler references in specs to be concrete or external;
+    # a partial version is treated as a range and fails with:
+    #   "Only external, or concrete, compilers are allowed for the fortran language"
+    packages_yaml_path = spack_user_cfg_dir_from_env(sandbox) / "packages.yaml"
+    if c_spec:
+        c_spec = resolve_concrete_compiler_spec(c_spec, packages_yaml_path)
+    if fortran_spec:
+        fortran_spec = resolve_concrete_compiler_spec(fortran_spec, packages_yaml_path)
+
     # Concretizer policy:
     # - no constraints   -> unify: true (single solve)
     # - compiler only    -> unify: when_possible (macOS compatibility)
@@ -963,9 +1125,13 @@ def create_env(
         unify_val = "true"
 
     # Specs: either individual packages or a custom spec for dependency-only workflow
-    # Build compiler and target constraint suffix if needed (propagates to all dependencies)
+    # Build compiler constraint suffix if needed (propagates to all dependencies).
+    # NOTE: target is NOT embedded in the spec string — it is expressed via a
+    # packages.all.require in the packages block. Embedding target= directly in a
+    # spec that uses a split compiler constraint (fortran=gcc@X) triggers a Spack
+    # concretizer bug: "Only external, or concrete, compilers are allowed for the
+    # fortran language".
     compiler_suffix = ""
-    target_suffix = f" target={target}" if target else ""
     if c_spec and fortran_spec:
         # Both C/C++ and Fortran specified
         if is_mac_os() and fortran_spec.startswith("gcc"):
@@ -988,32 +1154,36 @@ def create_env(
             compiler_suffix = f" %{fortran_spec} languages:=fortran"
 
     if custom_spec:
-        spec_lines = [f"    - {custom_spec}{compiler_suffix}{target_suffix}"]
+        spec_lines = [f"    - {custom_spec}{compiler_suffix}"]
         eprint(
             f"==> Using custom spec '{custom_spec}' (for 'spack install --only dependencies' workflow)"
         )
     else:
         # Default: use geosgcm
-        spec_lines = [f"    - {DEFAULT_SPEC}{compiler_suffix}{target_suffix}"]
+        spec_lines = [f"    - {DEFAULT_SPEC}{compiler_suffix}"]
         eprint(f"==> Using default spec '{DEFAULT_SPEC}'")
     specs = "\n".join(spec_lines)
 
+    # Build packages block (python version/optimizations only).
+    # Target is written to the global user-scope packages.yaml by ensure_config,
+    # not per-environment.
     packages_block = ""
     if python or python_optimizations:
         lines = ["  packages:"]
-        lines.append("    python:")
-        if python:
-            # Ensure Python version has @ prefix for proper spec format
-            py_spec = python.strip()
-            if not py_spec.startswith("@"):
-                py_spec = f"@{py_spec}"
-            # Add variant if optimizations requested
-            if python_optimizations:
-                py_spec = f"{py_spec}+optimizations"
-            lines.append(f"      require: '{py_spec}'")
-        elif python_optimizations:
-            # Just the variant, no version constraint
-            lines.append("      require: '+optimizations'")
+        if python or python_optimizations:
+            lines.append("    python:")
+            if python:
+                # Ensure Python version has @ prefix for proper spec format
+                py_spec = python.strip()
+                if not py_spec.startswith("@"):
+                    py_spec = f"@{py_spec}"
+                # Add variant if optimizations requested
+                if python_optimizations:
+                    py_spec = f"{py_spec}+optimizations"
+                lines.append(f"      require: '{py_spec}'")
+            elif python_optimizations:
+                # Just the variant, no version constraint
+                lines.append("      require: '+optimizations'")
         packages_block = "\n" + "\n".join(lines) + "\n"
 
     # Add compiler env vars to work around Spack bug #51855
@@ -1345,7 +1515,12 @@ def main(argv: list[str]) -> int:
             return 0
 
     if cmd in ("all", "config", "setup", "config-clean", "env-create"):
-        ensure_config(spack_root, dry_run=dry_run, sandbox=sandbox)
+        ensure_config(
+            spack_root,
+            dry_run=dry_run,
+            sandbox=sandbox,
+            requested_target=getattr(args, "target", None),
+        )
         if cmd == "config":
             return 0
         if cmd == "setup":
@@ -1376,7 +1551,9 @@ def main(argv: list[str]) -> int:
                 sandbox=sandbox,
             )
             if getattr(args, "print_effective_target", False):
-                eprint(f"==> Effective target: {target if target else 'default (Spack host target)'}")
+                eprint(
+                    f"==> Effective target: {target if target else 'default (Spack host target)'}"
+                )
             custom_spec = getattr(args, "spec", None)
             auto_name = getattr(args, "auto_name", False)
             if auto_name:

@@ -237,8 +237,7 @@ When you use `--sandbox <directory>`, everything goes into that directory:
 ├── geosesm-spack/               # geosesm-spack repository
 ├── .spack/                      # User configuration (instead of ~/.spack)
 │   ├── config.yaml
-│   ├── packages.yaml
-│   ├── compilers.yaml
+│   ├── packages.yaml            # externals + optional packages:all:target
 │   ├── repos.yaml
 │   └── concretizer.yaml
 └── spack-envs/                  # Environments
@@ -545,10 +544,10 @@ You can specify a target microarchitecture for all packages in an environment us
 
 On Apple Silicon, if `--target` is not provided, the script automatically chooses a conservative default based on host architecture and Apple clang compatibility. This avoids invalid defaults when host hardware is newer than your installed Apple clang.
 
-Target precedence in `env-create`:
-1. Explicit `--target`
-2. Auto target (Apple Silicon only)
-3. Spack default/host target
+Target precedence for `packages:all:target` in global `packages.yaml`:
+1. Explicit `--target` — always written
+2. Apple clang forced downgrade (e.g., clang 16 on M3 host → writes `target: [m2]`)
+3. No override needed — nothing written, Spack uses its default
 
 ```bash
 # Target a specific x86_64 microarchitecture level
