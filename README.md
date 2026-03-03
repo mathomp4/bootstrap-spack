@@ -18,6 +18,8 @@ A macOS-focused bootstrap tool for [Spack](https://github.com/spack/spack) >= 1.
 - **Sandbox mode**: Isolate installations for testing without affecting your main setup
 - **Modular subcommands**: Run individual setup steps or full bootstrap
 - **Smart concretizer settings**: Optimizes unification strategy based on constraints
+- **View enabled by default**: Environments are created with `view: true` so the Spack view is available for building your own code against installed dependencies
+- **Compiler env vars always set**: `CC`, `CXX`, and `FC` are always written into `spack.yaml` from Spack's own `packages.yaml` (populated by `spack external find`), not PATH order
 
 ## Prerequisites
 
@@ -342,7 +344,7 @@ This environment will install dependencies of: geosgcm
 - The environment contains a single spec: `geosgcm` (or your chosen package)
 - Compiler constraints are applied via the spec syntax: `%[when='%c'] c=apple-clang %[when='%cxx'] cxx=apple-clang %[when='%fortran'] fortran=gcc@15`
 - These constraints propagate to all dependencies automatically
-- Compiler environment variables (`CC`, `CXX`, `FC`) are added to work around [Spack bug #51855](https://github.com/spack/spack/issues/51855)
+- Compiler environment variables (`CC`, `CXX`, `FC`) are always added to work around [Spack bug #51855](https://github.com/spack/spack/issues/51855), using paths read directly from Spack's `packages.yaml` rather than PATH order
 - Running `spack install --only dependencies` installs all dependencies without building the main package
 
 **Common specs:**
@@ -668,19 +670,11 @@ This occurs when using `--compiler apple-clang@17` alone. Apple's compiler suite
 - `--compiler-c apple-clang@17 --compiler-fortran gcc@15` (explicit control)
 - `--compiler-fortran gcc@15` (uses default apple-clang for C/C++, gcc for Fortran)
 
-### Compiler environment variables with --spec
+### Compiler environment variables (CC, CXX, FC)
 
-When creating environments, the script automatically adds `CC`, `CXX`, and `FC` environment variables to your `spack.yaml` when compiler constraints are specified. This is a workaround for [Spack bug #51855](https://github.com/spack/spack/issues/51855) which affects the `spack install --only dependencies` workflow.
+Every environment created by this script includes `CC`, `CXX`, and `FC` in its `spack.yaml`. Paths are read directly from Spack's `packages.yaml` (written by `spack external find` during `config`/`setup`), so they reflect exactly what Spack detected — not PATH order. When no `--compiler` flag is given on macOS, the defaults are apple-clang for C/C++ and the highest available Homebrew gcc for Fortran.
 
-You'll see output like:
-```
-==> Adding compiler env vars (workaround for Spack bug #51855):
-    CC=/usr/bin/clang
-    CXX=/usr/bin/clang++
-    FC=/opt/homebrew/bin/gfortran-15
-```
-
-This ensures your builds use the correct system compilers, not Spack wrapper scripts.
+This is a workaround for [Spack bug #51855](https://github.com/spack/spack/issues/51855) which affects the `spack install --only dependencies` workflow.
 
 ## Advanced Options
 

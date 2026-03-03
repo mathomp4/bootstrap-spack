@@ -212,12 +212,195 @@ def resolve_concrete_compiler_spec(spec: str, packages_yaml: Path | None = None)
     return spec
 
 
+def _parse_packages_yaml_compilers(packages_yaml: Path) -> dict[str, list[dict]]:
+    """
+    Parse packages.yaml and return a dict mapping compiler package name
+    (e.g. 'gcc', 'apple-clang') to a list of dicts with keys:
+      version (tuple of ints), c, cxx, fortran (paths, may be None)
+    Entries without extra_attributes.compilers are skipped.
+    """
+    import re as _re
+
+    result: dict[str, list[dict]] = {}
+    if not packages_yaml.exists():
+        return result
+
+    try:
+        text = packages_yaml.read_text()
+    except OSError:
+        return result
+
+    # Minimal YAML parse: find each compiler package block and its externals.
+    # We use regex rather than a full YAML parser to avoid a dependency on PyYAML
+    # (Spack ships its own ruamel; we don't want to import it from outside Spack).
+    #
+    # Structure we're looking for:
+    #   <pkg_name>:
+    #     externals:
+    #     - spec: gcc@15.2.0 ...
+    #       ...
+    #       extra_attributes:
+    #         compilers:
+    #           c: /path
+    #           cxx: /path
+    #           fortran: /path
+
+    # Package names sit at 2-space indent under the top-level "packages:" key.
+    pkg_block_re = _re.compile(r"^  (\S[^:\n]+):\s*$", _re.MULTILINE)
+    positions = [(m.group(1).strip(), m.start()) for m in pkg_block_re.finditer(text)]
+    positions.append(("__end__", len(text)))
+
+    for i, (pkg_name, start) in enumerate(positions[:-1]):
+        if pkg_name not in ("gcc", "apple-clang", "clang", "intel", "aocc"):
+            continue
+        block = text[start : positions[i + 1][1]]
+
+        # Find each external entry's spec
+        spec_re = _re.compile(r"-\s+spec:\s+(\S+)")
+        # Find compiler paths within an extra_attributes.compilers block.
+        # Anchor to start-of-line + whitespace to avoid matching "spec: apple-clang..."
+        # where "spec:" ends with the letters "c:".
+        compiler_c_re = _re.compile(r"^\s+c:\s+(\S+)", _re.MULTILINE)
+        compiler_cxx_re = _re.compile(r"^\s+cxx:\s+(\S+)", _re.MULTILINE)
+        compiler_fc_re = _re.compile(r"^\s+fortran:\s+(\S+)", _re.MULTILINE)
+
+        # Split block into per-entry chunks (each starts with "    - spec:")
+        entry_re = _re.compile(r"^\s+-\s+spec:", _re.MULTILINE)
+        entry_positions = [m.start() for m in entry_re.finditer(block)]
+        entry_positions.append(len(block))
+
+        entries = result.setdefault(pkg_name, [])
+        for j in range(len(entry_positions) - 1):
+            chunk = block[entry_positions[j] : entry_positions[j + 1]]
+            spec_m = spec_re.search(chunk)
+            if not spec_m:
+                continue
+            spec_str = spec_m.group(1)
+            # Extract version from spec (e.g. gcc@15.2.0)
+            ver_m = _re.search(r"@([\d.]+)", spec_str)
+            if not ver_m:
+                continue
+            ver_str = ver_m.group(1)
+            try:
+                ver_tuple = tuple(int(x) for x in ver_str.split(".") if x.isdigit())
+            except ValueError:
+                continue
+
+            c_path = (
+                compiler_c_re.search(chunk)
+                or type("", (), {"group": lambda s, n: None})()
+            ).group(1)
+            cxx_path = (
+                compiler_cxx_re.search(chunk)
+                or type("", (), {"group": lambda s, n: None})()
+            ).group(1)
+            fc_path = (
+                compiler_fc_re.search(chunk)
+                or type("", (), {"group": lambda s, n: None})()
+            ).group(1)
+
+            if not (c_path or cxx_path or fc_path):
+                continue
+
+            entries.append(
+                {
+                    "version": ver_tuple,
+                    "spec": spec_str,
+                    "c": c_path,
+                    "cxx": cxx_path,
+                    "fortran": fc_path,
+                }
+            )
+
+    return result
+
+
+def find_compiler_paths_from_packages_yaml(
+    packages_yaml: Path,
+    c_spec: str | None,
+    fortran_spec: str | None,
+) -> dict[str, str]:
+    """
+    Resolve CC, CXX, FC from packages.yaml using Spack's recorded compiler paths.
+
+    When c_spec/fortran_spec are given, match by package name + major version.
+    When they are None (no explicit compiler), pick the highest available version
+    of apple-clang (CC/CXX) and gcc (FC) — matching the macOS default strategy.
+    """
+    parsed = _parse_packages_yaml_compilers(packages_yaml)
+    env_vars: dict[str, str] = {}
+
+    def best_entry(pkg: str, major: str | None) -> dict | None:
+        entries = parsed.get(pkg, [])
+        if not entries:
+            return None
+        if major is not None:
+            entries = [
+                e for e in entries if e["version"] and str(e["version"][0]) == major
+            ]
+        if not entries:
+            return None
+        return max(entries, key=lambda e: e["version"])
+
+    # --- C / CXX ---
+    if c_spec:
+        if "apple-clang" in c_spec or "clang" in c_spec:
+            pkg = "apple-clang" if "apple-clang" in c_spec else "clang"
+            major = c_spec.split("@")[1].split(".")[0] if "@" in c_spec else None
+            entry = best_entry(pkg, major)
+        elif "gcc" in c_spec:
+            major = c_spec.split("@")[1].split(".")[0] if "@" in c_spec else None
+            entry = best_entry("gcc", major)
+        else:
+            entry = None
+        if entry:
+            if entry.get("c"):
+                env_vars["CC"] = entry["c"]
+            if entry.get("cxx"):
+                env_vars["CXX"] = entry["cxx"]
+    else:
+        # No explicit c_spec: prefer apple-clang, fall back to highest gcc
+        entry = (
+            best_entry("apple-clang", None)
+            or best_entry("clang", None)
+            or best_entry("gcc", None)
+        )
+        if entry:
+            if entry.get("c"):
+                env_vars["CC"] = entry["c"]
+            if entry.get("cxx"):
+                env_vars["CXX"] = entry["cxx"]
+
+    # --- FC ---
+    if fortran_spec:
+        if "gcc" in fortran_spec or "gfortran" in fortran_spec:
+            major = (
+                fortran_spec.split("@")[1].split(".")[0]
+                if "@" in fortran_spec
+                else None
+            )
+            entry = best_entry("gcc", major)
+        else:
+            entry = None
+        if entry and entry.get("fortran"):
+            env_vars["FC"] = entry["fortran"]
+    else:
+        # No explicit fortran_spec: pick highest gcc with a fortran path
+        gcc_entries = [e for e in parsed.get("gcc", []) if e.get("fortran")]
+        if gcc_entries:
+            entry = max(gcc_entries, key=lambda e: e["version"])
+            env_vars["FC"] = entry["fortran"]
+
+    return env_vars
+
+
 def find_system_compiler_paths(
     c_spec: str | None, fortran_spec: str | None
 ) -> dict[str, str]:
     """
     Find actual system paths to compilers (not Spack wrappers).
     Returns dict with CC, CXX, and/or FC set to system paths.
+    Falls back to PATH probing when no packages.yaml is available.
     """
     env_vars = {}
 
@@ -263,7 +446,6 @@ def find_system_compiler_paths(
             gfortran_path = shutil_which(gfortran_name)
             if gfortran_path:
                 env_vars["FC"] = gfortran_path
-
     return env_vars
 
 
@@ -1186,26 +1368,30 @@ def create_env(
                 lines.append("      require: '+optimizations'")
         packages_block = "\n" + "\n".join(lines) + "\n"
 
-    # Add compiler env vars to work around Spack bug #51855
-    # This helps Spack find the correct compilers in various workflows
+    # Add compiler env vars to work around Spack bug #51855.
+    # Always set CC/CXX/FC so the environment picks up the correct system compilers
+    # regardless of whether a compiler constraint was explicitly specified.
+    # Paths are read from packages.yaml (written by `spack external find` during
+    # ensure_config) so they reflect exactly what Spack detected, not PATH order.
     env_vars_block = ""
-    if has_compiler_constraint:
-        compiler_paths = find_system_compiler_paths(c_spec, fortran_spec)
-        if compiler_paths:
-            eprint("==> Adding compiler env vars (workaround for Spack bug #51855):")
-            lines = ["  env_vars:"]
-            lines.append("    set:")
-            for var, path in sorted(compiler_paths.items()):
-                lines.append(f"      {var}: {path}")
-                eprint(f"    {var}={path}")
-            env_vars_block = "\n" + "\n".join(lines) + "\n"
+    compiler_paths = find_compiler_paths_from_packages_yaml(
+        packages_yaml_path, c_spec, fortran_spec
+    )
+    if compiler_paths:
+        eprint("==> Adding compiler env vars (workaround for Spack bug #51855):")
+        lines = ["  env_vars:"]
+        lines.append("    set:")
+        for var, path in sorted(compiler_paths.items()):
+            lines.append(f"      {var}: {path}")
+            eprint(f"    {var}={path}")
+        env_vars_block = "\n" + "\n".join(lines) + "\n"
 
     content = f"""spack:
   specs:
 {specs}
   concretizer:
     unify: {unify_val}
-{packages_block}{env_vars_block}  view: false
+{packages_block}{env_vars_block}  view: true
 """
 
     spack_yaml = env_dir / "spack.yaml"
