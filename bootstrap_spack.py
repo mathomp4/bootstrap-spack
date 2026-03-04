@@ -853,22 +853,25 @@ def pick_spack_interactive() -> tuple[str, str | None]:
     raise SystemExit("ERROR: invalid selection")
 
 
-def spack_bash_prefix(spack_root: str, env_vars: dict | None = None) -> str:
-    # Using bash -lc so we can source setup-env.sh.
-    # Include any environment variable overrides before sourcing.
-    prefix = ""
-    if env_vars:
-        for key, val in env_vars.items():
-            prefix += f"export {key}={shlex.quote(str(val))} && "
-    return f"{prefix}source {shlex.quote(spack_root)}/share/spack/setup-env.sh"
-
-
 def make_spack_env(sandbox: Path | None = None) -> dict[str, str]:
     """Create environment dict for running spack commands."""
     env = {}
     if sandbox:
         env["SPACK_USER_CONFIG_PATH"] = str(sandbox / ".spack")
     return env
+
+
+def spack_bash_prefix(spack_root: str, env_vars: dict | None = None) -> str:
+    # Using bash -lc so we can source setup-env.sh.
+    # Unset SPACK_ENV and SPACK_CONCRETE_ENV_DIR first so that any currently
+    # activated Spack environment in the caller's shell does not leak into
+    # subprocesses (which would cause "no environment in <path>" errors when
+    # the env path doesn't exist in a sandbox or fresh install).
+    prefix = "unset SPACK_ENV SPACK_CONCRETE_ENV_DIR && "
+    if env_vars:
+        for key, val in env_vars.items():
+            prefix += f"export {key}={shlex.quote(str(val))} && "
+    return f"{prefix}source {shlex.quote(spack_root)}/share/spack/setup-env.sh"
 
 
 def spack_cmd(
