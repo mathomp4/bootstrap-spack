@@ -139,8 +139,12 @@ EXTERNAL_FIND_EXCLUDES = [
     "meson",
 ]
 
-# Default spec for environments (GEOSgcm and its dependencies)
-DEFAULT_SPEC = "geosgcm"
+# Default spec for environments.
+# geosgcm-deps is a BundlePackage that mirrors all of GEOSgcm's dependencies.
+# Using it means "spack install" (no --only dependencies flag needed) and
+# afterwards users can do "spack load geosgcm-deps" instead of loading each
+# dependency package individually.
+DEFAULT_SPEC = "geosgcm-deps"
 
 
 def spack_user_cfg_dir_from_env(sandbox: Path | None = None) -> Path:
@@ -453,6 +457,15 @@ def eprint(*args: object) -> None:
     print(*args, file=sys.stderr)
 
 
+def _spec_is_bundle(spec: str | None) -> bool:
+    """Return True when spec looks like a BundlePackage (currently geosgcm-deps)."""
+    if not spec:
+        return False
+    # Normalise: strip variants / compiler suffixes so we only check the name.
+    base = spec.split()[0].split("%")[0].split("@")[0].strip()
+    return base == "geosgcm-deps"
+
+
 def print_minimal_advice(
     spack_root: str,
     env_name: str | None = None,
@@ -470,13 +483,20 @@ def print_minimal_advice(
     eprint("")
     if env_name:
         if spec:
-            eprint(f"This environment will install dependencies of: {spec}")
+            eprint(f"This environment will install: {spec}")
             eprint("")
         eprint("Next steps:")
         eprint("  spack env list")
         eprint(f"  spack env activate {env_name}")
         eprint("  spack concretize")
-        eprint("  spack install --only dependencies")
+        if _spec_is_bundle(spec):
+            # BundlePackages have no build phase; plain 'spack install' is correct.
+            eprint("  spack install")
+            eprint("")
+            eprint("After installation, load all GEOSgcm dependencies with:")
+            eprint(f"  spack load {spec.split()[0] if spec else 'geosgcm-deps'}")
+        else:
+            eprint("  spack install --only dependencies")
         eprint("")
     eprint("=" * 64)
     eprint("")
@@ -1237,6 +1257,7 @@ def create_env(
     sandbox: Path | None = None,
     custom_spec: str | None = None,
     target: str | None = None,
+    view: bool = False,
 ) -> None:
     if env_dir.exists():
         eprint(f"==> Environment already exists: {env_dir}")
@@ -1346,27 +1367,31 @@ def create_env(
         eprint(f"==> Using default spec '{DEFAULT_SPEC}'")
     specs = "\n".join(spec_lines)
 
-    # Build packages block (python version/optimizations only).
+    # Build packages block.
+    # - openmpi variants are always required for a working GEOS build.
+    # - python version/optimizations are only added when explicitly requested.
     # Target is written to the global user-scope packages.yaml by ensure_config,
     # not per-environment.
-    packages_block = ""
+    lines = ["  packages:"]
+    lines.append("    openmpi:")
+    lines.append(
+        "      require: '+fortran +internal-hwloc +internal-libevent +internal-pmix'"
+    )
     if python or python_optimizations:
-        lines = ["  packages:"]
-        if python or python_optimizations:
-            lines.append("    python:")
-            if python:
-                # Ensure Python version has @ prefix for proper spec format
-                py_spec = python.strip()
-                if not py_spec.startswith("@"):
-                    py_spec = f"@{py_spec}"
-                # Add variant if optimizations requested
-                if python_optimizations:
-                    py_spec = f"{py_spec}+optimizations"
-                lines.append(f"      require: '{py_spec}'")
-            elif python_optimizations:
-                # Just the variant, no version constraint
-                lines.append("      require: '+optimizations'")
-        packages_block = "\n" + "\n".join(lines) + "\n"
+        lines.append("    python:")
+        if python:
+            # Ensure Python version has @ prefix for proper spec format
+            py_spec = python.strip()
+            if not py_spec.startswith("@"):
+                py_spec = f"@{py_spec}"
+            # Add variant if optimizations requested
+            if python_optimizations:
+                py_spec = f"{py_spec}+optimizations"
+            lines.append(f"      require: '{py_spec}'")
+        elif python_optimizations:
+            # Just the variant, no version constraint
+            lines.append("      require: '+optimizations'")
+    packages_block = "\n" + "\n".join(lines) + "\n"
 
     # Add compiler env vars to work around Spack bug #51855.
     # Always set CC/CXX/FC so the environment picks up the correct system compilers
@@ -1386,12 +1411,17 @@ def create_env(
             eprint(f"    {var}={path}")
         env_vars_block = "\n" + "\n".join(lines) + "\n"
 
+    # BundlePackages have no build products of their own; a merged view just
+    # wastes symlinks and slows install.  For non-bundle specs the view is
+    # useful when pointing external tools at a single prefix tree.
+    view_val = "true" if view else "false"
+
     content = f"""spack:
   specs:
 {specs}
   concretizer:
     unify: {unify_val}
-{packages_block}{env_vars_block}  view: true
+{packages_block}{env_vars_block}  view: {view_val}
 """
 
     spack_yaml = env_dir / "spack.yaml"
@@ -1603,6 +1633,13 @@ EXAMPLES:
         action="store_true",
         help="Print the resolved target and exit without creating or modifying an environment.",
     )
+    p_envc.add_argument(
+        "--view",
+        action="store_true",
+        default=False,
+        help="Enable a merged filesystem view in the environment (default: disabled). "
+        "Useful if you need a single prefix tree, but adds overhead for bundle packages.",
+    )
 
     p.set_defaults(cmd="all")
     return p.parse_args(argv)
@@ -1724,6 +1761,7 @@ def main(argv: list[str]) -> int:
         python = None
         python_optimizations = False
         target = None
+        view = False
         if cmd == "env-create":
             compiler = getattr(args, "compiler", None)
             compiler_c = getattr(args, "compiler_c", None)
@@ -1741,6 +1779,7 @@ def main(argv: list[str]) -> int:
                     f"==> Effective target: {target if target else 'default (Spack host target)'}"
                 )
             custom_spec = getattr(args, "spec", None)
+            view = getattr(args, "view", False)
             auto_name = getattr(args, "auto_name", False)
             if auto_name:
                 # For auto-naming, use the effective compiler (for fortran if split)
@@ -1765,6 +1804,7 @@ def main(argv: list[str]) -> int:
             sandbox=sandbox,
             custom_spec=custom_spec,
             target=target,
+            view=view,
         )
 
         if cmd == "env-create":
