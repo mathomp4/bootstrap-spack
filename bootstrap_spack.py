@@ -863,10 +863,9 @@ def make_spack_env(sandbox: Path | None = None) -> dict[str, str]:
 
 def spack_bash_prefix(spack_root: str, env_vars: dict | None = None) -> str:
     # Using bash -lc so we can source setup-env.sh.
-    # Unset SPACK_ENV and SPACK_CONCRETE_ENV_DIR first so that any currently
-    # activated Spack environment in the caller's shell does not leak into
-    # subprocesses (which would cause "no environment in <path>" errors when
-    # the env path doesn't exist in a sandbox or fresh install).
+    # Unset SPACK_ENV and SPACK_CONCRETE_ENV_DIR as a defensive measure — main()
+    # already rejects runs where SPACK_ENV is set, but unset here guards against
+    # any future code paths that invoke subprocesses without going through main().
     prefix = "unset SPACK_ENV SPACK_CONCRETE_ENV_DIR && "
     if env_vars:
         for key, val in env_vars.items():
@@ -1650,6 +1649,15 @@ EXAMPLES:
 
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
+
+    if os.environ.get("SPACK_ENV"):
+        eprint(
+            "ERROR: SPACK_ENV is set — you appear to be inside an active Spack environment.\n"
+            f"       Active environment: {os.environ['SPACK_ENV']}\n"
+            "       Please run 'spack env deactivate' before using this bootstrapper."
+        )
+        return 1
+
     if not is_supported_platform():
         eprint(f"ERROR: this bootstrap currently targets {list(platforms.values())}.")
         return 2
