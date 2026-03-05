@@ -70,6 +70,12 @@ USAGE EXAMPLES:
   # Create environment with custom name and compiler constraint:
   ./bootstrap_spack.py --spack mathomp4 env-create --name my-env --compiler apple-clang@17
 
+    # Print resolved target and continue environment creation:
+    ./bootstrap_spack.py --spack mathomp4 env-create --print-effective-target --auto-name --compiler gcc@15
+
+    # Print resolved target only (no setup/env changes):
+    ./bootstrap_spack.py --spack mathomp4 env-create --print-effective-target-only
+
   # Create environment with Python version constraint only:
   ./bootstrap_spack.py --spack mathomp4 env-create --auto-name --python 3.11
   # Result: creates environment named "geos-py311"
@@ -92,6 +98,8 @@ KEY DESIGN NOTES:
   rather than `spack config add` to handle array-of-dicts safely.
 - Environments are created under ~/spack-envs (configured via environments_root).
 - The --auto-name flag generates environment names from toolchain specs.
+- Target precedence is: explicit --target, then auto target on Apple Silicon
+    based on min(host target, Apple-clang capability).
 """
 
 from __future__ import annotations
@@ -99,6 +107,8 @@ from __future__ import annotations
 import argparse
 import datetime as _dt
 import os
+import platform
+import re
 import shlex
 import subprocess
 import sys
@@ -129,8 +139,263 @@ EXTERNAL_FIND_EXCLUDES = [
     "meson",
 ]
 
-# Default spec for environments (GEOSgcm and its dependencies)
-DEFAULT_SPEC = "geosgcm"
+# Default spec for environments.
+# geosgcm-deps is a BundlePackage that mirrors all of GEOSgcm's dependencies.
+# Using it means "spack install" (no --only dependencies flag needed) and
+# afterwards users can do "spack load geosgcm-deps" instead of loading each
+# dependency package individually.
+DEFAULT_SPEC = "geosgcm-deps"
+
+
+def spack_user_cfg_dir_from_env(sandbox: Path | None = None) -> Path:
+    """Return the user config directory path without invoking spack."""
+    if sandbox:
+        return sandbox / ".spack"
+    cfg = os.environ.get("SPACK_USER_CONFIG_PATH")
+    if cfg:
+        return Path(cfg)
+    return Path.home() / ".spack"
+
+
+def resolve_concrete_compiler_spec(spec: str, packages_yaml: Path | None = None) -> str:
+    """
+    Resolve a potentially partial compiler spec (e.g., 'gcc@15') to the concrete
+    version found in packages.yaml (e.g., 'gcc@15.2.0').
+
+    Spack v1 requires the fortran/c/cxx compiler references in specs to be
+    either external (concrete) or fully versioned. A partial version like 'gcc@15'
+    is treated as a version range and fails concretization with:
+      "Only external, or concrete, compilers are allowed for the fortran language"
+
+    If no match is found, returns the original spec unchanged.
+    """
+    if not spec or "@" not in spec:
+        return spec
+
+    name, ver = spec.split("@", 1)
+    # Already fully concrete (has at least two dots, e.g., 15.2.0)
+    if ver.count(".") >= 2:
+        return spec
+
+    # Try to find a matching concrete version in packages.yaml
+    if packages_yaml is None or not packages_yaml.exists():
+        return spec
+
+    try:
+        import re as _re
+
+        text = packages_yaml.read_text()
+        # Look for lines like: - spec: gcc@15.2.0 ...
+        pattern = _re.compile(
+            r"spec:\s*" + _re.escape(name) + r"@(\d+\.\d+\.\d+[^\s]*)"
+        )
+        # Find all matches, pick the one whose major version matches
+        ver_major = ver.split(".")[0]
+        candidates = []
+        for m in pattern.finditer(text):
+            full_ver = m.group(1)
+            if full_ver.startswith(ver_major + "."):
+                candidates.append(full_ver)
+        if len(candidates) == 1:
+            resolved = f"{name}@{candidates[0]}"
+            eprint(f"==> Resolved compiler spec: {spec} -> {resolved}")
+            return resolved
+        elif len(candidates) > 1:
+            # Multiple matches — pick the highest
+            candidates.sort(
+                key=lambda v: [int(x) for x in v.split(".")[:3] if x.isdigit()]
+            )
+            resolved = f"{name}@{candidates[-1]}"
+            eprint(
+                f"==> Resolved compiler spec (multiple matches, picked highest): {spec} -> {resolved}"
+            )
+            return resolved
+    except Exception:
+        pass
+
+    return spec
+
+
+def _parse_packages_yaml_compilers(packages_yaml: Path) -> dict[str, list[dict]]:
+    """
+    Parse packages.yaml and return a dict mapping compiler package name
+    (e.g. 'gcc', 'apple-clang') to a list of dicts with keys:
+      version (tuple of ints), c, cxx, fortran (paths, may be None)
+    Entries without extra_attributes.compilers are skipped.
+    """
+    import re as _re
+
+    result: dict[str, list[dict]] = {}
+    if not packages_yaml.exists():
+        return result
+
+    try:
+        text = packages_yaml.read_text()
+    except OSError:
+        return result
+
+    # Minimal YAML parse: find each compiler package block and its externals.
+    # We use regex rather than a full YAML parser to avoid a dependency on PyYAML
+    # (Spack ships its own ruamel; we don't want to import it from outside Spack).
+    #
+    # Structure we're looking for:
+    #   <pkg_name>:
+    #     externals:
+    #     - spec: gcc@15.2.0 ...
+    #       ...
+    #       extra_attributes:
+    #         compilers:
+    #           c: /path
+    #           cxx: /path
+    #           fortran: /path
+
+    # Package names sit at 2-space indent under the top-level "packages:" key.
+    pkg_block_re = _re.compile(r"^  (\S[^:\n]+):\s*$", _re.MULTILINE)
+    positions = [(m.group(1).strip(), m.start()) for m in pkg_block_re.finditer(text)]
+    positions.append(("__end__", len(text)))
+
+    for i, (pkg_name, start) in enumerate(positions[:-1]):
+        if pkg_name not in ("gcc", "apple-clang", "clang", "intel", "aocc"):
+            continue
+        block = text[start : positions[i + 1][1]]
+
+        # Find each external entry's spec
+        spec_re = _re.compile(r"-\s+spec:\s+(\S+)")
+        # Find compiler paths within an extra_attributes.compilers block.
+        # Anchor to start-of-line + whitespace to avoid matching "spec: apple-clang..."
+        # where "spec:" ends with the letters "c:".
+        compiler_c_re = _re.compile(r"^\s+c:\s+(\S+)", _re.MULTILINE)
+        compiler_cxx_re = _re.compile(r"^\s+cxx:\s+(\S+)", _re.MULTILINE)
+        compiler_fc_re = _re.compile(r"^\s+fortran:\s+(\S+)", _re.MULTILINE)
+
+        # Split block into per-entry chunks (each starts with "    - spec:")
+        entry_re = _re.compile(r"^\s+-\s+spec:", _re.MULTILINE)
+        entry_positions = [m.start() for m in entry_re.finditer(block)]
+        entry_positions.append(len(block))
+
+        entries = result.setdefault(pkg_name, [])
+        for j in range(len(entry_positions) - 1):
+            chunk = block[entry_positions[j] : entry_positions[j + 1]]
+            spec_m = spec_re.search(chunk)
+            if not spec_m:
+                continue
+            spec_str = spec_m.group(1)
+            # Extract version from spec (e.g. gcc@15.2.0)
+            ver_m = _re.search(r"@([\d.]+)", spec_str)
+            if not ver_m:
+                continue
+            ver_str = ver_m.group(1)
+            try:
+                ver_tuple = tuple(int(x) for x in ver_str.split(".") if x.isdigit())
+            except ValueError:
+                continue
+
+            c_path = (
+                compiler_c_re.search(chunk)
+                or type("", (), {"group": lambda s, n: None})()
+            ).group(1)
+            cxx_path = (
+                compiler_cxx_re.search(chunk)
+                or type("", (), {"group": lambda s, n: None})()
+            ).group(1)
+            fc_path = (
+                compiler_fc_re.search(chunk)
+                or type("", (), {"group": lambda s, n: None})()
+            ).group(1)
+
+            if not (c_path or cxx_path or fc_path):
+                continue
+
+            entries.append(
+                {
+                    "version": ver_tuple,
+                    "spec": spec_str,
+                    "c": c_path,
+                    "cxx": cxx_path,
+                    "fortran": fc_path,
+                }
+            )
+
+    return result
+
+
+def find_compiler_paths_from_packages_yaml(
+    packages_yaml: Path,
+    c_spec: str | None,
+    fortran_spec: str | None,
+) -> dict[str, str]:
+    """
+    Resolve CC, CXX, FC from packages.yaml using Spack's recorded compiler paths.
+
+    When c_spec/fortran_spec are given, match by package name + major version.
+    When they are None (no explicit compiler), pick the highest available version
+    of apple-clang (CC/CXX) and gcc (FC) — matching the macOS default strategy.
+    """
+    parsed = _parse_packages_yaml_compilers(packages_yaml)
+    env_vars: dict[str, str] = {}
+
+    def best_entry(pkg: str, major: str | None) -> dict | None:
+        entries = parsed.get(pkg, [])
+        if not entries:
+            return None
+        if major is not None:
+            entries = [
+                e for e in entries if e["version"] and str(e["version"][0]) == major
+            ]
+        if not entries:
+            return None
+        return max(entries, key=lambda e: e["version"])
+
+    # --- C / CXX ---
+    if c_spec:
+        if "apple-clang" in c_spec or "clang" in c_spec:
+            pkg = "apple-clang" if "apple-clang" in c_spec else "clang"
+            major = c_spec.split("@")[1].split(".")[0] if "@" in c_spec else None
+            entry = best_entry(pkg, major)
+        elif "gcc" in c_spec:
+            major = c_spec.split("@")[1].split(".")[0] if "@" in c_spec else None
+            entry = best_entry("gcc", major)
+        else:
+            entry = None
+        if entry:
+            if entry.get("c"):
+                env_vars["CC"] = entry["c"]
+            if entry.get("cxx"):
+                env_vars["CXX"] = entry["cxx"]
+    else:
+        # No explicit c_spec: prefer apple-clang, fall back to highest gcc
+        entry = (
+            best_entry("apple-clang", None)
+            or best_entry("clang", None)
+            or best_entry("gcc", None)
+        )
+        if entry:
+            if entry.get("c"):
+                env_vars["CC"] = entry["c"]
+            if entry.get("cxx"):
+                env_vars["CXX"] = entry["cxx"]
+
+    # --- FC ---
+    if fortran_spec:
+        if "gcc" in fortran_spec or "gfortran" in fortran_spec:
+            major = (
+                fortran_spec.split("@")[1].split(".")[0]
+                if "@" in fortran_spec
+                else None
+            )
+            entry = best_entry("gcc", major)
+        else:
+            entry = None
+        if entry and entry.get("fortran"):
+            env_vars["FC"] = entry["fortran"]
+    else:
+        # No explicit fortran_spec: pick highest gcc with a fortran path
+        gcc_entries = [e for e in parsed.get("gcc", []) if e.get("fortran")]
+        if gcc_entries:
+            entry = max(gcc_entries, key=lambda e: e["version"])
+            env_vars["FC"] = entry["fortran"]
+
+    return env_vars
 
 
 def find_system_compiler_paths(
@@ -139,6 +404,7 @@ def find_system_compiler_paths(
     """
     Find actual system paths to compilers (not Spack wrappers).
     Returns dict with CC, CXX, and/or FC set to system paths.
+    Falls back to PATH probing when no packages.yaml is available.
     """
     env_vars = {}
 
@@ -184,12 +450,20 @@ def find_system_compiler_paths(
             gfortran_path = shutil_which(gfortran_name)
             if gfortran_path:
                 env_vars["FC"] = gfortran_path
-
     return env_vars
 
 
 def eprint(*args: object) -> None:
     print(*args, file=sys.stderr)
+
+
+def _spec_is_bundle(spec: str | None) -> bool:
+    """Return True when spec looks like a BundlePackage (currently geosgcm-deps)."""
+    if not spec:
+        return False
+    # Normalise: strip variants / compiler suffixes so we only check the name.
+    base = spec.split()[0].split("%")[0].split("@")[0].strip()
+    return base == "geosgcm-deps"
 
 
 def print_minimal_advice(
@@ -209,13 +483,20 @@ def print_minimal_advice(
     eprint("")
     if env_name:
         if spec:
-            eprint(f"This environment will install dependencies of: {spec}")
+            eprint(f"This environment will install: {spec}")
             eprint("")
         eprint("Next steps:")
         eprint("  spack env list")
         eprint(f"  spack env activate {env_name}")
         eprint("  spack concretize")
-        eprint("  spack install --only dependencies")
+        if _spec_is_bundle(spec):
+            # BundlePackages have no build phase; plain 'spack install' is correct.
+            eprint("  spack install")
+            eprint("")
+            eprint("After installation, load all GEOSgcm dependencies with:")
+            eprint(f"  spack load {spec.split()[0] if spec else 'geosgcm-deps'}")
+        else:
+            eprint("  spack install --only dependencies")
         eprint("")
     eprint("=" * 64)
     eprint("")
@@ -237,6 +518,177 @@ def is_mac_os() -> bool:
 
 def is_linux() -> bool:
     return sys.platform == platforms["Linux"]
+
+
+def parse_apple_silicon_target_generation(target: str | None) -> int | None:
+    """Parse Spack Apple Silicon targets like m1, m2, m3 -> 1, 2, 3."""
+    if not target:
+        return None
+    match = re.fullmatch(r"m(\d+)", target.strip().lower())
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def apple_clang_max_target(clang_major: int) -> str:
+    """Conservative Apple-clang target cap for Apple Silicon generations."""
+    if clang_major >= 17:
+        return "m3"
+    if clang_major == 16:
+        return "m2"
+    return "m1"
+
+
+def detect_apple_clang_major(*, dry_run: bool) -> int | None:
+    if dry_run:
+        return None
+    clang = shutil_which("clang")
+    if not clang:
+        return None
+    res = run([clang, "--version"], dry_run=False, check=False)
+    if res.returncode != 0:
+        return None
+    match = re.search(r"Apple clang version\s+(\d+)", res.stdout)
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def detect_spack_host_target(
+    spack_root: str, *, dry_run: bool, sandbox: Path | None = None
+) -> str | None:
+    if dry_run:
+        return None
+
+    # Prefer spack from selected spack_root if it exists.
+    setup_env = Path(spack_root) / "share" / "spack" / "setup-env.sh"
+    if setup_env.exists():
+        res = spack_run(
+            spack_root, ["arch", "-t"], dry_run=False, check=False, sandbox=sandbox
+        )
+        if res.returncode == 0:
+            lines = [line.strip() for line in res.stdout.splitlines() if line.strip()]
+            if lines:
+                return lines[-1]
+
+    # Fallback to a spack command already available in PATH.
+    if have("spack"):
+        res = run(["spack", "arch", "-t"], dry_run=False, check=False)
+        if res.returncode == 0:
+            lines = [line.strip() for line in res.stdout.splitlines() if line.strip()]
+            if lines:
+                return lines[-1]
+
+    # Last fallback on Apple Silicon if spack isn't available yet.
+    machine = platform.machine().lower()
+    if machine in ("arm64", "aarch64"):
+        return "m1"
+
+    return None
+
+
+def resolve_effective_target(
+    spack_root: str,
+    requested_target: str | None,
+    *,
+    dry_run: bool,
+    sandbox: Path | None = None,
+) -> str | None:
+    """
+    Resolve target precedence:
+      1) explicit --target
+      2) auto target from min(host_target, apple-clang cap) on Apple Silicon
+      3) None (let Spack default)
+
+    Always returns the resolved target (or None if not on Apple Silicon / not
+    determinable). Use resolve_packages_all_target() when you only want the
+    target if it actually needs to be written to config (i.e. explicit or
+    forced downgrade).
+    """
+    if not is_mac_os():
+        return requested_target
+
+    host_target = detect_spack_host_target(spack_root, dry_run=dry_run, sandbox=sandbox)
+    clang_major = detect_apple_clang_major(dry_run=dry_run)
+
+    if requested_target:
+        req_gen = parse_apple_silicon_target_generation(requested_target)
+        if clang_major is not None and req_gen is not None:
+            cap_target = apple_clang_max_target(clang_major)
+            cap_gen = parse_apple_silicon_target_generation(cap_target)
+            if cap_gen is not None and req_gen > cap_gen:
+                raise SystemExit(
+                    f"ERROR: requested --target {requested_target} exceeds Apple clang {clang_major} capability ({cap_target})."
+                )
+        return requested_target
+
+    host_gen = parse_apple_silicon_target_generation(host_target)
+    if clang_major is None or host_gen is None:
+        return None
+
+    cap_target = apple_clang_max_target(clang_major)
+    cap_gen = parse_apple_silicon_target_generation(cap_target)
+    if cap_gen is None:
+        return None
+
+    selected_target = f"m{min(host_gen, cap_gen)}"
+    if selected_target != host_target:
+        eprint(
+            f"==> Auto target: host={host_target}, Apple clang={clang_major} -> using target={selected_target}"
+        )
+    else:
+        eprint(
+            f"==> Auto target: host={host_target}, Apple clang={clang_major} -> using host target"
+        )
+    return selected_target
+
+
+def resolve_packages_all_target(
+    spack_root: str,
+    requested_target: str | None,
+    *,
+    dry_run: bool,
+    sandbox: Path | None = None,
+) -> str | None:
+    """
+    Return a target to write to packages:all:target only when necessary:
+      - explicit --target was passed, OR
+      - Apple clang capability forced a downgrade below the host target.
+
+    Returns None when the host target is already compatible (no override needed),
+    so we don't pollute packages.yaml with a redundant constraint.
+    """
+    if not is_mac_os():
+        return requested_target
+
+    # Explicit request: always honour it (resolve_effective_target validates it)
+    if requested_target:
+        return resolve_effective_target(
+            spack_root, requested_target, dry_run=dry_run, sandbox=sandbox
+        )
+
+    host_target = detect_spack_host_target(spack_root, dry_run=dry_run, sandbox=sandbox)
+    clang_major = detect_apple_clang_major(dry_run=dry_run)
+
+    host_gen = parse_apple_silicon_target_generation(host_target)
+    if clang_major is None or host_gen is None:
+        return None
+
+    cap_target = apple_clang_max_target(clang_major)
+    cap_gen = parse_apple_silicon_target_generation(cap_target)
+    if cap_gen is None:
+        return None
+
+    if cap_gen < host_gen:
+        # Downgrade required — write target to config
+        selected_target = f"m{cap_gen}"
+        eprint(
+            f"==> Target downgrade required: host={host_target}, Apple clang={clang_major} cap={cap_target} -> writing target={selected_target} to packages.yaml"
+        )
+        return selected_target
+
+    # No downgrade needed — let Spack use its default
+    return None
 
 
 def run(
@@ -401,22 +853,24 @@ def pick_spack_interactive() -> tuple[str, str | None]:
     raise SystemExit("ERROR: invalid selection")
 
 
-def spack_bash_prefix(spack_root: str, env_vars: dict | None = None) -> str:
-    # Using bash -lc so we can source setup-env.sh.
-    # Include any environment variable overrides before sourcing.
-    prefix = ""
-    if env_vars:
-        for key, val in env_vars.items():
-            prefix += f"export {key}={shlex.quote(str(val))} && "
-    return f"{prefix}source {shlex.quote(spack_root)}/share/spack/setup-env.sh"
-
-
 def make_spack_env(sandbox: Path | None = None) -> dict[str, str]:
     """Create environment dict for running spack commands."""
     env = {}
     if sandbox:
         env["SPACK_USER_CONFIG_PATH"] = str(sandbox / ".spack")
     return env
+
+
+def spack_bash_prefix(spack_root: str, env_vars: dict | None = None) -> str:
+    # Using bash -lc so we can source setup-env.sh.
+    # Unset SPACK_ENV and SPACK_CONCRETE_ENV_DIR as a defensive measure — main()
+    # already rejects runs where SPACK_ENV is set, but unset here guards against
+    # any future code paths that invoke subprocesses without going through main().
+    prefix = "unset SPACK_ENV SPACK_CONCRETE_ENV_DIR && "
+    if env_vars:
+        for key, val in env_vars.items():
+            prefix += f"export {key}={shlex.quote(str(val))} && "
+    return f"{prefix}source {shlex.quote(spack_root)}/share/spack/setup-env.sh"
 
 
 def spack_cmd(
@@ -501,7 +955,8 @@ def ensure_repos(
         "git@github.com:GMAO-SI-Team/geosesm-spack.git", geosesm_dir, dry_run=dry_run
     )
 
-    user_cfg = spack_user_cfg_dir(spack_root, dry_run=dry_run, sandbox=sandbox)
+    user_cfg = spack_user_cfg_dir_from_env(sandbox)
+    user_cfg.mkdir(parents=True, exist_ok=True)
     repos_yaml = user_cfg / "repos.yaml"
     eprint(f"==> Writing {repos_yaml}")
     content = f"""repos:
@@ -656,7 +1111,11 @@ print("ok")
 
 
 def ensure_config(
-    spack_root: str, *, dry_run: bool, sandbox: Path | None = None
+    spack_root: str,
+    *,
+    dry_run: bool,
+    sandbox: Path | None = None,
+    requested_target: str | None = None,
 ) -> None:
     eprint("==> Setting build_jobs=6")
     spack_run(
@@ -708,7 +1167,32 @@ def ensure_config(
             spack_root, dry_run=dry_run, brew_prefix=brew_prefix, sandbox=sandbox
         )
 
-    user_cfg = spack_user_cfg_dir(spack_root, dry_run=dry_run, sandbox=sandbox)
+    user_cfg = spack_user_cfg_dir_from_env(sandbox)
+    user_cfg.mkdir(parents=True, exist_ok=True)
+
+    # Write packages:all:target if a target override is needed (explicit request
+    # or Apple clang forced a downgrade below the host target).
+    packages_all_target = resolve_packages_all_target(
+        spack_root, requested_target, dry_run=dry_run, sandbox=sandbox
+    )
+    if packages_all_target:
+        eprint(
+            f"==> Writing packages:all:target: [{packages_all_target}] to packages.yaml"
+        )
+        spack_run(
+            spack_root,
+            [
+                "config",
+                "--scope",
+                "user",
+                "add",
+                f"packages:all:target:[{packages_all_target}]",
+            ],
+            dry_run=dry_run,
+            check=False,
+            sandbox=sandbox,
+        )
+
     concretizer_yaml = user_cfg / "concretizer.yaml"
     eprint(f"==> Writing concretizer.yaml (reuse: false) -> {concretizer_yaml}")
     content = "concretizer:\n  reuse: false\n"
@@ -775,6 +1259,7 @@ def create_env(
     sandbox: Path | None = None,
     custom_spec: str | None = None,
     target: str | None = None,
+    view: bool = False,
 ) -> None:
     if env_dir.exists():
         eprint(f"==> Environment already exists: {env_dir}")
@@ -822,6 +1307,16 @@ def create_env(
             c_spec = compiler
             fortran_spec = compiler
 
+    # Resolve partial compiler specs (e.g. gcc@15) to concrete versions (e.g. gcc@15.2.0).
+    # Spack v1 requires fortran/c/cxx compiler references in specs to be concrete or external;
+    # a partial version is treated as a range and fails with:
+    #   "Only external, or concrete, compilers are allowed for the fortran language"
+    packages_yaml_path = spack_user_cfg_dir_from_env(sandbox) / "packages.yaml"
+    if c_spec:
+        c_spec = resolve_concrete_compiler_spec(c_spec, packages_yaml_path)
+    if fortran_spec:
+        fortran_spec = resolve_concrete_compiler_spec(fortran_spec, packages_yaml_path)
+
     # Concretizer policy:
     # - no constraints   -> unify: true (single solve)
     # - compiler only    -> unify: when_possible (macOS compatibility)
@@ -835,9 +1330,13 @@ def create_env(
         unify_val = "true"
 
     # Specs: either individual packages or a custom spec for dependency-only workflow
-    # Build compiler and target constraint suffix if needed (propagates to all dependencies)
+    # Build compiler constraint suffix if needed (propagates to all dependencies).
+    # NOTE: target is NOT embedded in the spec string — it is expressed via a
+    # packages.all.require in the packages block. Embedding target= directly in a
+    # spec that uses a split compiler constraint (fortran=gcc@X) triggers a Spack
+    # concretizer bug: "Only external, or concrete, compilers are allowed for the
+    # fortran language".
     compiler_suffix = ""
-    target_suffix = f" target={target}" if target else ""
     if c_spec and fortran_spec:
         # Both C/C++ and Fortran specified
         if is_mac_os() and fortran_spec.startswith("gcc"):
@@ -860,19 +1359,27 @@ def create_env(
             compiler_suffix = f" %{fortran_spec} languages:=fortran"
 
     if custom_spec:
-        spec_lines = [f"    - {custom_spec}{compiler_suffix}{target_suffix}"]
+        spec_lines = [f"    - {custom_spec}{compiler_suffix}"]
         eprint(
             f"==> Using custom spec '{custom_spec}' (for 'spack install --only dependencies' workflow)"
         )
     else:
         # Default: use geosgcm
-        spec_lines = [f"    - {DEFAULT_SPEC}{compiler_suffix}{target_suffix}"]
+        spec_lines = [f"    - {DEFAULT_SPEC}{compiler_suffix}"]
         eprint(f"==> Using default spec '{DEFAULT_SPEC}'")
     specs = "\n".join(spec_lines)
 
-    packages_block = ""
+    # Build packages block.
+    # - openmpi variants are always required for a working GEOS build.
+    # - python version/optimizations are only added when explicitly requested.
+    # Target is written to the global user-scope packages.yaml by ensure_config,
+    # not per-environment.
+    lines = ["  packages:"]
+    lines.append("    openmpi:")
+    lines.append(
+        "      require: '+fortran +internal-hwloc +internal-libevent +internal-pmix'"
+    )
     if python or python_optimizations:
-        lines = ["  packages:"]
         lines.append("    python:")
         if python:
             # Ensure Python version has @ prefix for proper spec format
@@ -886,28 +1393,37 @@ def create_env(
         elif python_optimizations:
             # Just the variant, no version constraint
             lines.append("      require: '+optimizations'")
-        packages_block = "\n" + "\n".join(lines) + "\n"
+    packages_block = "\n" + "\n".join(lines) + "\n"
 
-    # Add compiler env vars to work around Spack bug #51855
-    # This helps Spack find the correct compilers in various workflows
+    # Add compiler env vars to work around Spack bug #51855.
+    # Always set CC/CXX/FC so the environment picks up the correct system compilers
+    # regardless of whether a compiler constraint was explicitly specified.
+    # Paths are read from packages.yaml (written by `spack external find` during
+    # ensure_config) so they reflect exactly what Spack detected, not PATH order.
     env_vars_block = ""
-    if has_compiler_constraint:
-        compiler_paths = find_system_compiler_paths(c_spec, fortran_spec)
-        if compiler_paths:
-            eprint("==> Adding compiler env vars (workaround for Spack bug #51855):")
-            lines = ["  env_vars:"]
-            lines.append("    set:")
-            for var, path in sorted(compiler_paths.items()):
-                lines.append(f"      {var}: {path}")
-                eprint(f"    {var}={path}")
-            env_vars_block = "\n" + "\n".join(lines) + "\n"
+    compiler_paths = find_compiler_paths_from_packages_yaml(
+        packages_yaml_path, c_spec, fortran_spec
+    )
+    if compiler_paths:
+        eprint("==> Adding compiler env vars (workaround for Spack bug #51855):")
+        lines = ["  env_vars:"]
+        lines.append("    set:")
+        for var, path in sorted(compiler_paths.items()):
+            lines.append(f"      {var}: {path}")
+            eprint(f"    {var}={path}")
+        env_vars_block = "\n" + "\n".join(lines) + "\n"
+
+    # BundlePackages have no build products of their own; a merged view just
+    # wastes symlinks and slows install.  For non-bundle specs the view is
+    # useful when pointing external tools at a single prefix tree.
+    view_val = "true" if view else "false"
 
     content = f"""spack:
   specs:
 {specs}
   concretizer:
     unify: {unify_val}
-{packages_block}{env_vars_block}  view: false
+{packages_block}{env_vars_block}  view: {view_val}
 """
 
     spack_yaml = env_dir / "spack.yaml"
@@ -948,6 +1464,9 @@ EXAMPLES:
   
   %(prog)s --spack mathomp4 env-create --auto-name --compiler gcc@15 --python 3.12
       Create environment named 'geos-gcc15-py312' with compiler and Python constraints
+
+  %(prog)s --spack official env-create --print-effective-target-only
+      Print resolved target and exit without environment creation
   
   %(prog)s --spack fork --fork jcsda setup
       Set up a custom fork (jcsda/spack and jcsda/spack-packages)
@@ -1025,6 +1544,9 @@ Use --auto-name to generate environment names from specs (e.g., geos-gcc15-py312
 On macOS, when --compiler gcc@X is specified, the script automatically uses apple-clang
 for C/C++ and gcc for Fortran (best practice). Use --compiler-c and --compiler-fortran
 for explicit control.
+
+If --target is omitted on Apple Silicon, the script auto-selects a conservative target
+based on host architecture and Apple clang compatibility.
         """,
         epilog="""
 EXAMPLES:
@@ -1045,6 +1567,12 @@ EXAMPLES:
   
   %(prog)s --spack mathomp4 env-create --compiler-c apple-clang@17 --compiler-fortran gcc@15
       Explicit control: apple-clang for C/C++, gcc for Fortran
+
+  %(prog)s --spack mathomp4 env-create --print-effective-target --auto-name --compiler gcc@15
+      Print resolved target, then create environment
+
+  %(prog)s --spack mathomp4 env-create --print-effective-target-only
+      Print resolved target and exit (no repo/config/env changes)
         """,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -1093,7 +1621,26 @@ EXAMPLES:
         "--target",
         default=None,
         help="Spack target architecture (e.g., 'x86_64_v3', 'icelake', 'm1'). "
-        "Constrains all packages to build for this specific microarchitecture.",
+        "Constrains all packages to build for this specific microarchitecture. "
+        "On Apple Silicon, if omitted, target is auto-selected from host+compiler compatibility. "
+        "If provided, values above Apple clang capability are rejected.",
+    )
+    p_envc.add_argument(
+        "--print-effective-target",
+        action="store_true",
+        help="Print the resolved target used for environment creation (after auto-detection/validation).",
+    )
+    p_envc.add_argument(
+        "--print-effective-target-only",
+        action="store_true",
+        help="Print the resolved target and exit without creating or modifying an environment.",
+    )
+    p_envc.add_argument(
+        "--view",
+        action="store_true",
+        default=False,
+        help="Enable a merged filesystem view in the environment (default: disabled). "
+        "Useful if you need a single prefix tree, but adds overhead for bundle packages.",
     )
 
     p.set_defaults(cmd="all")
@@ -1102,6 +1649,15 @@ EXAMPLES:
 
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
+
+    if os.environ.get("SPACK_ENV"):
+        eprint(
+            "ERROR: SPACK_ENV is set — you appear to be inside an active Spack environment.\n"
+            f"       Active environment: {os.environ['SPACK_ENV']}\n"
+            "       Please run 'spack env deactivate' before using this bootstrapper."
+        )
+        return 1
+
     if not is_supported_platform():
         eprint(f"ERROR: this bootstrap currently targets {list(platforms.values())}.")
         return 2
@@ -1142,6 +1698,18 @@ def main(argv: list[str]) -> int:
 
     cmd = args.cmd
 
+    if cmd == "env-create" and getattr(args, "print_effective_target_only", False):
+        target = resolve_effective_target(
+            spack_root,
+            getattr(args, "target", None),
+            dry_run=dry_run,
+            sandbox=sandbox,
+        )
+        eprint(
+            f"==> Effective target: {target if target else 'default (Spack host target)'}"
+        )
+        return 0
+
     if cmd in ("all", "brew", "setup"):
         if is_mac_os():
             ensure_brew_prereqs(brew, dry_run=dry_run)
@@ -1181,7 +1749,12 @@ def main(argv: list[str]) -> int:
             return 0
 
     if cmd in ("all", "config", "setup", "config-clean", "env-create"):
-        ensure_config(spack_root, dry_run=dry_run, sandbox=sandbox)
+        ensure_config(
+            spack_root,
+            dry_run=dry_run,
+            sandbox=sandbox,
+            requested_target=getattr(args, "target", None),
+        )
         if cmd == "config":
             return 0
         if cmd == "setup":
@@ -1199,14 +1772,25 @@ def main(argv: list[str]) -> int:
         python = None
         python_optimizations = False
         target = None
+        view = False
         if cmd == "env-create":
             compiler = getattr(args, "compiler", None)
             compiler_c = getattr(args, "compiler_c", None)
             compiler_fortran = getattr(args, "compiler_fortran", None)
             python = getattr(args, "python", None)
             python_optimizations = getattr(args, "python_optimizations", False)
-            target = getattr(args, "target", None)
+            target = resolve_effective_target(
+                spack_root,
+                getattr(args, "target", None),
+                dry_run=dry_run,
+                sandbox=sandbox,
+            )
+            if getattr(args, "print_effective_target", False):
+                eprint(
+                    f"==> Effective target: {target if target else 'default (Spack host target)'}"
+                )
             custom_spec = getattr(args, "spec", None)
+            view = getattr(args, "view", False)
             auto_name = getattr(args, "auto_name", False)
             if auto_name:
                 # For auto-naming, use the effective compiler (for fortran if split)
@@ -1231,6 +1815,7 @@ def main(argv: list[str]) -> int:
             sandbox=sandbox,
             custom_spec=custom_spec,
             target=target,
+            view=view,
         )
 
         if cmd == "env-create":
