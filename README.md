@@ -346,7 +346,7 @@ spack load geosgcm-deps
 # Now build GEOSgcm from your local source
 cd ~/GEOSgcm
 mepo clone
-cmake -B build
+cmake -B build --install-prefix=$(pwd)/install
 cmake --build build --target install -j
 ```
 
@@ -389,7 +389,7 @@ This sets `PATH`, `CMAKE_PREFIX_PATH`, `CC`, `CXX`, `FC`, and all other relevant
 ```bash
 cd ~/GEOSgcm   # (or wherever your checkout lives)
 mepo clone
-cmake -B build
+cmake -B build --install-prefix=$(pwd)/install
 cmake --build build --target install -j
 ```
 
@@ -573,7 +573,7 @@ spack load geosgcm-deps
 # Now build GEOSgcm from your local source (CC/CXX/FC are already set)
 cd ~/GEOSgcm
 mepo clone
-cmake -B build
+cmake -B build --install-prefix=$(pwd)/install
 cmake --build build --target install -j
 ```
 
