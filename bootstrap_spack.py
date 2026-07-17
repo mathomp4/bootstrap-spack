@@ -1594,7 +1594,26 @@ def create_env(
     # concretizer bug: "Only external, or concrete, compilers are allowed for the
     # fortran language".
     compiler_suffix = ""
-    if c_spec and fortran_spec:
+    # A BundlePackage has no build phase. In Spack 1.3, putting a single GCC
+    # compiler constraint directly on a bundle root (for example
+    # ``geosgcm-deps %gcc@15.2.0``) makes it implicitly depend on that compiler
+    # package. GCC cannot be both the selected compiler and a dependency of
+    # the bundle, so Linux concretization fails with "cannot depend on gcc".
+    #
+    # Keep macOS's split Apple Clang/GCC constraint: it selects Apple Clang for
+    # C/C++ and GCC for Fortran, and does not use the problematic single-GCC
+    # root constraint.
+    single_gcc_bundle_constraint = (
+        is_linux()
+        and _spec_is_bundle(custom_spec or DEFAULT_SPEC)
+        and c_spec == fortran_spec
+        and bool(c_spec)
+        and c_spec.startswith(("gcc", "gfortran"))
+    )
+    apply_compiler_constraint = not single_gcc_bundle_constraint
+    if not apply_compiler_constraint:
+        eprint("==> Not applying single-GCC compiler constraint to BundlePackage root")
+    elif c_spec and fortran_spec:
         # Both C/C++ and Fortran specified
         if c_spec == fortran_spec:
             # Same compiler for everything — no language splitting needed
