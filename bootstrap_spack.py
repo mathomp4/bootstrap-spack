@@ -112,8 +112,8 @@ import re
 import shlex
 import subprocess
 import sys
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Sequence
 
 BREW_PKGS = [
     "coreutils",
@@ -186,9 +186,7 @@ def resolve_concrete_compiler_spec(spec: str, packages_yaml: Path | None = None)
 
         text = packages_yaml.read_text()
         # Look for lines like: - spec: gcc@15.2.0 ...
-        pattern = _re.compile(
-            r"spec:\s*" + _re.escape(name) + r"@(\d+\.\d+\.\d+[^\s]*)"
-        )
+        pattern = _re.compile(r"spec:\s*" + _re.escape(name) + r"@(\d+\.\d+\.\d+[^\s]*)")
         # Find all matches, pick the one whose major version matches
         ver_major = ver.split(".")[0]
         candidates = []
@@ -202,9 +200,7 @@ def resolve_concrete_compiler_spec(spec: str, packages_yaml: Path | None = None)
             return resolved
         elif len(candidates) > 1:
             # Multiple matches — pick the highest
-            candidates.sort(
-                key=lambda v: [int(x) for x in v.split(".")[:3] if x.isdigit()]
-            )
+            candidates.sort(key=lambda v: [int(x) for x in v.split(".")[:3] if x.isdigit()])
             resolved = f"{name}@{candidates[-1]}"
             eprint(
                 f"==> Resolved compiler spec (multiple matches, picked highest): {spec} -> {resolved}"
@@ -291,16 +287,13 @@ def _parse_packages_yaml_compilers(packages_yaml: Path) -> dict[str, list[dict]]
                 continue
 
             c_path = (
-                compiler_c_re.search(chunk)
-                or type("", (), {"group": lambda s, n: None})()
+                compiler_c_re.search(chunk) or type("", (), {"group": lambda s, n: None})()
             ).group(1)
             cxx_path = (
-                compiler_cxx_re.search(chunk)
-                or type("", (), {"group": lambda s, n: None})()
+                compiler_cxx_re.search(chunk) or type("", (), {"group": lambda s, n: None})()
             ).group(1)
             fc_path = (
-                compiler_fc_re.search(chunk)
-                or type("", (), {"group": lambda s, n: None})()
+                compiler_fc_re.search(chunk) or type("", (), {"group": lambda s, n: None})()
             ).group(1)
 
             if not (c_path or cxx_path or fc_path):
@@ -339,9 +332,7 @@ def find_compiler_paths_from_packages_yaml(
         if not entries:
             return None
         if major is not None:
-            entries = [
-                e for e in entries if e["version"] and str(e["version"][0]) == major
-            ]
+            entries = [e for e in entries if e["version"] and str(e["version"][0]) == major]
         if not entries:
             return None
         return max(entries, key=lambda e: e["version"])
@@ -365,9 +356,7 @@ def find_compiler_paths_from_packages_yaml(
     else:
         # No explicit c_spec: prefer apple-clang, fall back to highest gcc
         entry = (
-            best_entry("apple-clang", None)
-            or best_entry("clang", None)
-            or best_entry("gcc", None)
+            best_entry("apple-clang", None) or best_entry("clang", None) or best_entry("gcc", None)
         )
         if entry:
             if entry.get("c"):
@@ -378,11 +367,7 @@ def find_compiler_paths_from_packages_yaml(
     # --- FC ---
     if fortran_spec:
         if "gcc" in fortran_spec or "gfortran" in fortran_spec:
-            major = (
-                fortran_spec.split("@")[1].split(".")[0]
-                if "@" in fortran_spec
-                else None
-            )
+            major = fortran_spec.split("@")[1].split(".")[0] if "@" in fortran_spec else None
             entry = best_entry("gcc", major)
         else:
             entry = None
@@ -398,9 +383,265 @@ def find_compiler_paths_from_packages_yaml(
     return env_vars
 
 
-def find_system_compiler_paths(
-    c_spec: str | None, fortran_spec: str | None
-) -> dict[str, str]:
+# Only trust specific patch-level releases. A version is acceptable when its
+# (major, minor) pair is in this set.  Add new entries as they are validated.
+LINUX_TRUSTED_GCC_VERSIONS: set[tuple[int, int]] = {
+    (14, 2),
+    (15, 2),
+}
+
+# Minimum Apple clang major version required on macOS.
+MACOS_MIN_APPLE_CLANG_MAJOR: int = 17
+
+# Trusted (major, minor) pairs for Homebrew gfortran / gcc on macOS.
+# Must match a supported GCC release that ships a working Fortran compiler.
+MACOS_TRUSTED_GFORTRAN_VERSIONS: set[tuple[int, int]] = {
+    (14, 2),
+    (15, 2),
+}
+
+
+def _gcc_full_version(gcc_bin: str) -> tuple[int, int, int] | None:
+    """
+    Return the (major, minor, patch) version tuple for a GCC binary,
+    or None if the binary cannot be queried / version cannot be parsed.
+    """
+    try:
+        r = subprocess.run(
+            [gcc_bin, "--version"],
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+        if r.returncode != 0:
+            return None
+        # First line is something like:
+        #   gcc (GCC) 15.2.0
+        #   gcc-15 (Ubuntu 15.2.0-1ubuntu1) 15.2.0
+        # We want the last "X.Y.Z" on the first line.
+        first_line = r.stdout.splitlines()[0] if r.stdout else ""
+        m = re.search(r"(\d+)\.(\d+)\.(\d+)", first_line)
+        if not m:
+            return None
+        return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    except Exception:
+        return None
+
+
+def _is_trusted_gcc(ver: tuple[int, int, int]) -> bool:
+    """Return True when (major, minor) appears in LINUX_TRUSTED_GCC_VERSIONS."""
+    return (ver[0], ver[1]) in LINUX_TRUSTED_GCC_VERSIONS
+
+
+def detect_linux_gcc_versions() -> list[tuple[tuple[int, int, int], str]]:
+    """
+    Scan PATH for GCC binaries on Linux and return all trusted versions.
+
+    Probes both versioned names (gcc-14, gcc-15, …) and the plain 'gcc'
+    binary (for distros that ship a single compiler without numbered symlinks).
+
+    A version is "trusted" when its (major, minor) is in
+    LINUX_TRUSTED_GCC_VERSIONS (currently 14.2.x and 15.2.x).
+
+    Returns a list of ((major, minor, patch), gcc_binary_path) tuples,
+    sorted ascending by version, with duplicates removed.
+    """
+    candidates: dict[tuple[int, int, int], str] = {}  # version -> first-found path
+
+    for p in os.environ.get("PATH", "").split(os.pathsep):
+        d = Path(p)
+        if not d.is_dir():
+            continue
+        for entry in d.iterdir():
+            # Match both plain "gcc" and versioned "gcc-N"
+            if not (entry.name == "gcc" or re.fullmatch(r"gcc-\d+", entry.name)):
+                continue
+            if not os.access(entry, os.X_OK):
+                continue
+            ver = _gcc_full_version(str(entry))
+            if ver is None:
+                continue
+            if not _is_trusted_gcc(ver):
+                continue
+            # Keep the first PATH occurrence for each version tuple
+            if ver not in candidates:
+                candidates[ver] = str(entry)
+
+    return sorted(candidates.items(), key=lambda t: t[0])
+
+
+def require_linux_gcc(*, dry_run: bool) -> str:
+    """
+    Ensure at least one trusted GCC (see LINUX_TRUSTED_GCC_VERSIONS) is
+    available on Linux.  Returns a Spack compiler spec string for the highest
+    qualifying version (e.g. 'gcc@15.2.0').
+    Raises SystemExit if none is found (unless dry_run).
+    """
+    if dry_run:
+        trusted_str = ", ".join(f"{maj}.{mn}.x" for maj, mn in sorted(LINUX_TRUSTED_GCC_VERSIONS))
+        eprint(f"[dry-run] would check for trusted GCC ({trusted_str}) on Linux")
+        return "gcc@14.2.0"
+
+    versions = detect_linux_gcc_versions()
+    if not versions:
+        trusted_str = " or ".join(
+            f">= {maj}.{mn}" for maj, mn in sorted(LINUX_TRUSTED_GCC_VERSIONS)
+        )
+        example_major = max(maj for maj, _ in LINUX_TRUSTED_GCC_VERSIONS)
+        example_minor = max(mn for maj, mn in LINUX_TRUSTED_GCC_VERSIONS if maj == example_major)
+        raise SystemExit(
+            "ERROR: No trusted GCC found on this Linux system.\n"
+            "       Trusted versions require (major, minor) in: "
+            + str({f"{maj}.{mn}" for maj, mn in LINUX_TRUSTED_GCC_VERSIONS})
+            + f"\n"
+            f"       e.g.:  sudo apt install gcc-{example_major} gfortran-{example_major}  # Debian/Ubuntu\n"
+            f"              sudo dnf install gcc-{example_major} gcc-gfortran              # RHEL/Fedora\n"
+            f"\n"
+            f"       If you have GCC installed as plain 'gcc', ensure 'gcc --version'\n"
+            f"       reports a trusted version (e.g., {example_major}.{example_minor}.x)."
+        )
+
+    highest_ver, highest_path = versions[-1]
+    ver_str = ".".join(str(x) for x in highest_ver)
+    eprint(
+        "==> Linux GCC check: found trusted GCC versions: "
+        + ", ".join(".".join(str(x) for x in v) for v, _ in versions)
+    )
+    eprint(f"==> Selected: gcc@{ver_str} ({highest_path})")
+    return f"gcc@{ver_str}"
+
+
+def _detect_macos_apple_clang_major() -> int | None:
+    """
+    Return the Apple clang major version by running ``clang --version``,
+    or None if clang is not found or the version cannot be parsed.
+    """
+    clang = shutil_which("clang")
+    if not clang:
+        return None
+    try:
+        r = subprocess.run(
+            [clang, "--version"],
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+        if r.returncode != 0:
+            return None
+        m = re.search(r"Apple clang version\s+(\d+)", r.stdout)
+        if not m:
+            return None
+        return int(m.group(1))
+    except Exception:
+        return None
+
+
+def _detect_macos_gfortran_versions() -> list[tuple[tuple[int, int, int], str]]:
+    """
+    Scan PATH for Homebrew gfortran / gcc Fortran compilers on macOS.
+
+    Probes ``gfortran``, ``gfortran-N``, ``gcc-N`` (gcc also ships gfortran
+    on Homebrew) using ``--version``.  Filters against
+    MACOS_TRUSTED_GFORTRAN_VERSIONS and returns a sorted ascending list of
+    ``((major, minor, patch), binary_path)`` tuples with duplicates removed.
+    """
+    candidates: dict[tuple[int, int, int], str] = {}
+
+    for p in os.environ.get("PATH", "").split(os.pathsep):
+        d = Path(p)
+        if not d.is_dir():
+            continue
+        for entry in d.iterdir():
+            if not (
+                entry.name == "gfortran"
+                or re.fullmatch(r"gfortran-\d+", entry.name)
+                or re.fullmatch(r"gcc-\d+", entry.name)
+            ):
+                continue
+            if not os.access(entry, os.X_OK):
+                continue
+            ver = _gcc_full_version(str(entry))
+            if ver is None:
+                continue
+            if (ver[0], ver[1]) not in MACOS_TRUSTED_GFORTRAN_VERSIONS:
+                continue
+            if ver not in candidates:
+                candidates[ver] = str(entry)
+
+    return sorted(candidates.items(), key=lambda t: t[0])
+
+
+def require_macos_compilers(*, dry_run: bool) -> str:
+    """
+    On macOS, verify:
+      1. Apple clang >= MACOS_MIN_APPLE_CLANG_MAJOR (currently 17) is available.
+      2. At least one trusted Homebrew gfortran/gcc is available
+         (MACOS_TRUSTED_GFORTRAN_VERSIONS: currently 14.2.x or 15.2.x).
+
+    Returns a Spack compiler spec string for the highest qualifying gfortran
+    version (e.g. ``'gcc@15.2.0'``), which callers use to auto-select the
+    Fortran compiler for environment creation.
+
+    Raises SystemExit with actionable instructions if either check fails,
+    unless *dry_run* is True (in which case it returns a placeholder spec).
+    """
+    if dry_run:
+        trusted_str = ", ".join(
+            f"{maj}.{mn}.x" for maj, mn in sorted(MACOS_TRUSTED_GFORTRAN_VERSIONS)
+        )
+        eprint(
+            f"[dry-run] would check Apple clang >= {MACOS_MIN_APPLE_CLANG_MAJOR}"
+            f" and trusted gfortran ({trusted_str}) on macOS"
+        )
+        return "gcc@14.2.0"
+
+    # --- Apple clang check ---
+    clang_major = _detect_macos_apple_clang_major()
+    if clang_major is None:
+        raise SystemExit(
+            "ERROR: Could not detect Apple clang on this macOS system.\n"
+            "       Please install Xcode Command Line Tools:\n"
+            "         xcode-select --install\n"
+            "       Then re-run this script."
+        )
+    if clang_major < MACOS_MIN_APPLE_CLANG_MAJOR:
+        raise SystemExit(
+            f"ERROR: Apple clang {clang_major} is too old.\n"
+            f"       Minimum required: Apple clang {MACOS_MIN_APPLE_CLANG_MAJOR}.\n"
+            f"       Please update Xcode / Command Line Tools:\n"
+            f"         sudo softwareupdate -i -a\n"
+            f"         xcode-select --install"
+        )
+    eprint(
+        f"==> macOS Apple clang check: found clang {clang_major} (>= {MACOS_MIN_APPLE_CLANG_MAJOR} OK)"
+    )
+
+    # --- Homebrew gfortran check ---
+    gfort_versions = _detect_macos_gfortran_versions()
+    if not gfort_versions:
+        example_major = max(maj for maj, _ in MACOS_TRUSTED_GFORTRAN_VERSIONS)
+        trusted_str = " or ".join(
+            f"{maj}.{mn}.x" for maj, mn in sorted(MACOS_TRUSTED_GFORTRAN_VERSIONS)
+        )
+        raise SystemExit(
+            f"ERROR: No trusted Homebrew gfortran found on this macOS system.\n"
+            f"       Trusted versions: {trusted_str}\n"
+            f"       Install with Homebrew:\n"
+            f"         brew install gcc@{example_major}\n"
+            f"       Then re-run this script."
+        )
+
+    highest_ver, highest_path = gfort_versions[-1]
+    ver_str = ".".join(str(x) for x in highest_ver)
+    eprint(
+        "==> macOS gfortran check: found trusted versions: "
+        + ", ".join(".".join(str(x) for x in v) for v, _ in gfort_versions)
+    )
+    eprint(f"==> Selected: gcc@{ver_str} ({highest_path})")
+    return f"gcc@{ver_str}"
+
+
+def find_system_compiler_paths(c_spec: str | None, fortran_spec: str | None) -> dict[str, str]:
     """
     Find actual system paths to compilers (not Spack wrappers).
     Returns dict with CC, CXX, and/or FC set to system paths.
@@ -495,6 +736,13 @@ def print_minimal_advice(
             eprint("")
             eprint("After installation, load all GEOSgcm dependencies with:")
             eprint(f"  spack load {spec.split()[0] if spec else 'geosgcm-deps'}")
+            eprint("")
+            eprint("Then build GEOSgcm from your local source tree:")
+            eprint("  cd ~/GEOSgcm   # (or wherever your checkout lives)")
+            eprint("  mepo clone")
+            eprint("  mkdir build && cd build")
+            eprint("  cmake ..")
+            eprint("  make -j install")
         else:
             eprint("  spack install --only dependencies")
         eprint("")
@@ -563,9 +811,7 @@ def detect_spack_host_target(
     # Prefer spack from selected spack_root if it exists.
     setup_env = Path(spack_root) / "share" / "spack" / "setup-env.sh"
     if setup_env.exists():
-        res = spack_run(
-            spack_root, ["arch", "-t"], dry_run=False, check=False, sandbox=sandbox
-        )
+        res = spack_run(spack_root, ["arch", "-t"], dry_run=False, check=False, sandbox=sandbox)
         if res.returncode == 0:
             lines = [line.strip() for line in res.stdout.splitlines() if line.strip()]
             if lines:
@@ -705,9 +951,7 @@ def run(
     return subprocess.run(cmd, check=check, text=True, capture_output=True, env=run_env)
 
 
-def run_bash(
-    script: str, *, dry_run: bool, check: bool = True
-) -> subprocess.CompletedProcess:
+def run_bash(script: str, *, dry_run: bool, check: bool = True) -> subprocess.CompletedProcess:
     return run(["bash", "-lc", script], dry_run=dry_run, check=check)
 
 
@@ -873,9 +1117,7 @@ def spack_bash_prefix(spack_root: str, env_vars: dict | None = None) -> str:
     return f"{prefix}source {shlex.quote(spack_root)}/share/spack/setup-env.sh"
 
 
-def spack_cmd(
-    spack_root: str, args: Sequence[str], env_vars: dict | None = None
-) -> str:
+def spack_cmd(spack_root: str, args: Sequence[str], env_vars: dict | None = None) -> str:
     # Return a bash -lc string that runs spack with given args.
     return f"{spack_bash_prefix(spack_root, env_vars)} && spack {' '.join(shlex.quote(a) for a in args)}"
 
@@ -892,9 +1134,7 @@ def spack_run(
     return run_bash(spack_cmd(spack_root, args, env_vars), dry_run=dry_run, check=check)
 
 
-def spack_user_cfg_dir(
-    spack_root: str, *, dry_run: bool, sandbox: Path | None = None
-) -> Path:
+def spack_user_cfg_dir(spack_root: str, *, dry_run: bool, sandbox: Path | None = None) -> Path:
     # Spack >=1.2: print-file gives us the exact file path.
     r = spack_run(
         spack_root,
@@ -921,12 +1161,8 @@ def spack_user_cfg_dir(
 def ensure_spack(
     spack_root: str, spack_repo: str, *, dry_run: bool, sandbox: Path | None = None
 ) -> None:
-    git_clone_if_missing(
-        f"git@github.com:{spack_repo}.git", Path(spack_root), dry_run=dry_run
-    )
-    r = spack_run(
-        spack_root, ["--version"], dry_run=dry_run, check=False, sandbox=sandbox
-    )
+    git_clone_if_missing(f"git@github.com:{spack_repo}.git", Path(spack_root), dry_run=dry_run)
+    r = spack_run(spack_root, ["--version"], dry_run=dry_run, check=False, sandbox=sandbox)
     if dry_run:
         eprint("==> Spack available: spack")
     else:
@@ -995,15 +1231,11 @@ def backup_user_cfg(user_cfg: Path, *, dry_run: bool) -> Path:
     return bdir
 
 
-def reset_user_cfg(
-    spack_root: str, *, dry_run: bool, sandbox: Path | None = None
-) -> None:
+def reset_user_cfg(spack_root: str, *, dry_run: bool, sandbox: Path | None = None) -> None:
     user_cfg = spack_user_cfg_dir(spack_root, dry_run=dry_run, sandbox=sandbox)
     backup_user_cfg(user_cfg, dry_run=dry_run)
 
-    eprint(
-        f"==> Resetting (removing) user config files managed by this tool in: {user_cfg}"
-    )
+    eprint(f"==> Resetting (removing) user config files managed by this tool in: {user_cfg}")
     for name in ["repos.yaml", "packages.yaml", "concretizer.yaml"]:
         p = user_cfg / name
         if p.exists():
@@ -1038,9 +1270,7 @@ def ensure_tcsh_external_via_spack_python(
             if len(parts) >= 2:
                 tcsh_ver = parts[1]
 
-    eprint(
-        f"==> Ensuring tcsh external (via spack python): tcsh@{tcsh_ver} prefix={brew_prefix}"
-    )
+    eprint(f"==> Ensuring tcsh external (via spack python): tcsh@{tcsh_ver} prefix={brew_prefix}")
 
     code = f"""
 import spack.config as cfg
@@ -1070,9 +1300,7 @@ print("ok")
 """.lstrip()
 
     if dry_run:
-        eprint(
-            "[dry-run] would run: spack python <tempfile> (update user-scope packages config)"
-        )
+        eprint("[dry-run] would run: spack python <tempfile> (update user-scope packages config)")
         return
 
     # Write temp script and run it
@@ -1116,7 +1344,17 @@ def ensure_config(
     dry_run: bool,
     sandbox: Path | None = None,
     requested_target: str | None = None,
-) -> None:
+) -> str | None:
+    """
+    Configure Spack: build_jobs, environments_root, compilers, externals, concretizer.
+
+    On Linux, also enforces a trusted GCC version (see LINUX_TRUSTED_GCC_VERSIONS).
+    On macOS, enforces Apple clang >= MACOS_MIN_APPLE_CLANG_MAJOR and a trusted
+    Homebrew gfortran version (see MACOS_TRUSTED_GFORTRAN_VERSIONS).
+
+    Returns the highest qualifying compiler spec (e.g. 'gcc@15.2.0') so callers
+    can auto-select it for environment creation.  Returns None when not applicable.
+    """
     eprint("==> Setting build_jobs=6")
     spack_run(
         spack_root,
@@ -1137,10 +1375,20 @@ def ensure_config(
         sandbox=sandbox,
     )
 
+    # On Linux, enforce a trusted GCC version (LINUX_TRUSTED_GCC_VERSIONS) before
+    # finding compilers. This also returns the spec for the highest qualifying
+    # version so main() can auto-select it for environment creation.
+    compiler_spec: str | None = None
+    if is_linux():
+        compiler_spec = require_linux_gcc(dry_run=dry_run)
+    elif is_mac_os():
+        # On macOS, enforce Apple clang >= MACOS_MIN_APPLE_CLANG_MAJOR and a
+        # trusted Homebrew gfortran version.  Returns the gfortran spec so
+        # main() can auto-select it for Fortran in environment creation.
+        compiler_spec = require_macos_compilers(dry_run=dry_run)
+
     eprint("==> Finding compilers")
-    spack_run(
-        spack_root, ["compiler", "find"], dry_run=dry_run, check=False, sandbox=sandbox
-    )
+    spack_run(spack_root, ["compiler", "find"], dry_run=dry_run, check=False, sandbox=sandbox)
 
     eprint("==> Finding externals (with excludes) + bash")
     ext_cmd = ["external", "find"]
@@ -1176,9 +1424,7 @@ def ensure_config(
         spack_root, requested_target, dry_run=dry_run, sandbox=sandbox
     )
     if packages_all_target:
-        eprint(
-            f"==> Writing packages:all:target: [{packages_all_target}] to packages.yaml"
-        )
+        eprint(f"==> Writing packages:all:target: [{packages_all_target}] to packages.yaml")
         spack_run(
             spack_root,
             [
@@ -1200,6 +1446,8 @@ def ensure_config(
         eprint("[dry-run] would write:\n" + content.rstrip())
     else:
         concretizer_yaml.write_text(content)
+
+    return compiler_spec
 
 
 def auto_env_name(base: str, compiler: str | None, python: str | None) -> str:
@@ -1299,9 +1547,7 @@ def create_env(
             # Find the default apple-clang version
             c_spec = "apple-clang"  # Spack will find the default version
             fortran_spec = compiler
-            eprint(
-                f"==> macOS detected: using apple-clang for C/C++, {compiler} for Fortran"
-            )
+            eprint(f"==> macOS detected: using apple-clang for C/C++, {compiler} for Fortran")
         else:
             # Use specified compiler for all languages
             c_spec = compiler
@@ -1344,9 +1590,7 @@ def create_env(
             compiler_suffix = f" %[when='%c'] c={c_spec} %[when='%cxx'] cxx={c_spec} %[when='%fortran'] fortran={fortran_spec}"
         else:
             # Both compilers, use languages constraint
-            compiler_suffix = (
-                f" %{c_spec} languages:=c,cxx %{fortran_spec} languages:=fortran"
-            )
+            compiler_suffix = f" %{c_spec} languages:=c,cxx %{fortran_spec} languages:=fortran"
     elif c_spec:
         # C/C++ only
         compiler_suffix = f" %{c_spec}"
@@ -1376,9 +1620,7 @@ def create_env(
     # not per-environment.
     lines = ["  packages:"]
     lines.append("    openmpi:")
-    lines.append(
-        "      require: '+fortran +internal-hwloc +internal-libevent +internal-pmix'"
-    )
+    lines.append("      require: '+fortran +internal-hwloc +internal-libevent +internal-pmix'")
     if python or python_optimizations:
         lines.append("    python:")
         if python:
@@ -1448,29 +1690,29 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         description="""
 Bootstrap Spack with fork-aware layout and environment management.
 
-Running with no arguments will interactively prompt for Spack choice and perform 
+Running with no arguments will interactively prompt for Spack choice and perform
 a full bootstrap (brew + spack + repos + config + default env).
         """,
         epilog="""
 EXAMPLES:
   %(prog)s
       Default: interactive prompt, then full bootstrap (all subcommand)
-  
+
   %(prog)s --spack official setup
       Set up official Spack without creating an environment
-  
+
   %(prog)s --spack mathomp4 all
       Full bootstrap with mathomp4 fork including default environment
-  
+
   %(prog)s --spack mathomp4 env-create --auto-name --compiler gcc@15 --python 3.12
       Create environment named 'geos-gcc15-py312' with compiler and Python constraints
 
   %(prog)s --spack official env-create --print-effective-target-only
       Print resolved target and exit without environment creation
-  
+
   %(prog)s --spack fork --fork jcsda setup
       Set up a custom fork (jcsda/spack and jcsda/spack-packages)
-  
+
   %(prog)s --dry-run --spack official config-clean
       Preview what config-clean would do without making changes
 
@@ -1479,9 +1721,7 @@ For more details, see the docstring at the top of this script.
         formatter_class=argparse.RawDescriptionHelpFormatter,
         add_help=True,
     )
-    p.add_argument(
-        "--dry-run", action="store_true", help="Print actions without changing anything"
-    )
+    p.add_argument("--dry-run", action="store_true", help="Print actions without changing anything")
     p.add_argument(
         "--sandbox",
         type=Path,
@@ -1497,12 +1737,8 @@ For more details, see the docstring at the top of this script.
         default="interactive",
         help="Which Spack to use (default: interactive, prompts user)",
     )
-    p.add_argument(
-        "--fork", default=None, help="Fork org/user name (required with --spack fork)"
-    )
-    p.add_argument(
-        "--spack-repo", default=None, help="Override spack repo (e.g., org/spack)"
-    )
+    p.add_argument("--fork", default=None, help="Fork org/user name (required with --spack fork)")
+    p.add_argument("--spack-repo", default=None, help="Override spack repo (e.g., org/spack)")
     p.add_argument(
         "--spack-packages-repo",
         default=None,
@@ -1512,26 +1748,18 @@ For more details, see the docstring at the top of this script.
     sub = p.add_subparsers(dest="cmd", required=False)
 
     # Simple commands with no extra args
-    sub.add_parser(
-        "all", help="Full bootstrap: brew + spack + repos + config + default env"
-    )
+    sub.add_parser("all", help="Full bootstrap: brew + spack + repos + config + default env")
     sub.add_parser("brew", help="Install Homebrew prerequisites only")
     sub.add_parser("spack", help="Clone Spack repository only")
-    sub.add_parser(
-        "repos", help="Clone and configure spack-packages and geosesm-spack repos"
-    )
-    sub.add_parser(
-        "config", help="Configure Spack (build_jobs, compilers, externals, concretizer)"
-    )
+    sub.add_parser("repos", help="Clone and configure spack-packages and geosesm-spack repos")
+    sub.add_parser("config", help="Configure Spack (build_jobs, compilers, externals, concretizer)")
     sub.add_parser(
         "setup",
         help="Complete setup without environment: brew + spack + repos + config",
     )
     sub.add_parser("env", help="Create default 'geos' environment")
     sub.add_parser("reset", help="Backup and remove user-scope config files")
-    sub.add_parser(
-        "config-clean", help="Reset config, then rebuild repos and config from scratch"
-    )
+    sub.add_parser("config-clean", help="Reset config, then rebuild repos and config from scratch")
 
     # env-create: create a named environment (optionally with compiler constraint)
     p_envc = sub.add_parser(
@@ -1552,19 +1780,19 @@ based on host architecture and Apple clang compatibility.
 EXAMPLES:
   %(prog)s --spack mathomp4 env-create
       Create default 'geos' environment
-  
+
   %(prog)s --spack mathomp4 env-create --name my-project
       Create environment named 'my-project'
-  
+
   %(prog)s --spack mathomp4 env-create --auto-name --compiler gcc@15 --python 3.12
       Create 'geos-gcc15-py312' (macOS: apple-clang for C/C++, gcc@15 for Fortran)
-  
+
   %(prog)s --spack mathomp4 env-create --auto-name --compiler apple-clang@17
       Create 'geos-appleclang17' environment with apple-clang for all languages
-  
+
   %(prog)s --spack mathomp4 env-create --auto-name --compiler-fortran gcc@15
       Create 'geos-gcc15' with default C/C++ and gcc@15 for Fortran
-  
+
   %(prog)s --spack mathomp4 env-create --compiler-c apple-clang@17 --compiler-fortran gcc@15
       Explicit control: apple-clang for C/C++, gcc for Fortran
 
@@ -1576,9 +1804,7 @@ EXAMPLES:
         """,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    p_envc.add_argument(
-        "--name", default="geos", help="Environment name (default: geos)"
-    )
+    p_envc.add_argument("--name", default="geos", help="Environment name (default: geos)")
     p_envc.add_argument(
         "--auto-name",
         action="store_true",
@@ -1675,15 +1901,17 @@ def main(argv: list[str]) -> int:
     if is_mac_os():
         brew = ensure_homebrew(dry_run=dry_run)
 
+    # Will be set by ensure_config to the highest trusted compiler spec,
+    # e.g. 'gcc@15.2.0' (Linux GCC) or 'gcc@15.2.0' (macOS Homebrew gfortran).
+    auto_compiler_spec: str | None = None
+
     # Determine spack choice
     spack_choice = args.spack
     fork = args.fork
     if spack_choice == "interactive":
         spack_choice, fork = pick_spack_interactive()
 
-    layout = spack_layout(
-        spack_choice, fork, args.spack_repo, args.spack_packages_repo, sandbox
-    )
+    layout = spack_layout(spack_choice, fork, args.spack_repo, args.spack_packages_repo, sandbox)
     spack_root = layout["spack_root"]
     spack_packages_dir = layout["spack_packages_dir"]
 
@@ -1705,9 +1933,7 @@ def main(argv: list[str]) -> int:
             dry_run=dry_run,
             sandbox=sandbox,
         )
-        eprint(
-            f"==> Effective target: {target if target else 'default (Spack host target)'}"
-        )
+        eprint(f"==> Effective target: {target if target else 'default (Spack host target)'}")
         return 0
 
     if cmd in ("all", "brew", "setup"):
@@ -1749,7 +1975,7 @@ def main(argv: list[str]) -> int:
             return 0
 
     if cmd in ("all", "config", "setup", "config-clean", "env-create"):
-        ensure_config(
+        auto_compiler_spec = ensure_config(
             spack_root,
             dry_run=dry_run,
             sandbox=sandbox,
@@ -1777,6 +2003,12 @@ def main(argv: list[str]) -> int:
             compiler = getattr(args, "compiler", None)
             compiler_c = getattr(args, "compiler_c", None)
             compiler_fortran = getattr(args, "compiler_fortran", None)
+            # If no explicit compiler was given, auto-select the highest trusted compiler
+            # returned by ensure_config (GCC on Linux, Homebrew gcc/gfortran on macOS).
+            if not compiler and not compiler_c and not compiler_fortran:
+                if auto_compiler_spec:
+                    eprint(f"==> Auto-selecting compiler {auto_compiler_spec} for environment")
+                    compiler = auto_compiler_spec
             python = getattr(args, "python", None)
             python_optimizations = getattr(args, "python_optimizations", False)
             target = resolve_effective_target(
@@ -1800,6 +2032,11 @@ def main(argv: list[str]) -> int:
                 env_name = getattr(args, "name", "geos")
         else:
             custom_spec = None
+            # On 'all' or 'env' commands, auto-select the highest trusted compiler
+            # if ensure_config returned one and no compiler was explicitly requested.
+            if auto_compiler_spec:
+                eprint(f"==> Auto-selecting compiler {auto_compiler_spec} for environment")
+                compiler = auto_compiler_spec
         env_path = env_root / env_name
 
         create_env(

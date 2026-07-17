@@ -1,10 +1,10 @@
 # bootstrap-spack
 
-A macOS-focused bootstrap tool for [Spack](https://github.com/spack/spack) >= 1.2 with intelligent fork-aware layout and environment management.
+A bootstrap tool for [Spack](https://github.com/spack/spack) >= 1.2 with intelligent fork-aware layout and environment management, supporting macOS and Linux.
 
 ## Overview
 
-`bootstrap_spack.py` is a comprehensive tool that automates the setup and configuration of Spack installations on macOS. It handles everything from Homebrew prerequisites to Spack repository cloning, compiler detection, and environment creation with advanced constraint support.
+`bootstrap_spack.py` is a comprehensive tool that automates the setup and configuration of Spack installations on macOS and Linux. It handles everything from prerequisite checks to Spack repository cloning, compiler detection with version enforcement, and environment creation with advanced constraint support.
 
 ### Key Features
 
@@ -13,6 +13,10 @@ A macOS-focused bootstrap tool for [Spack](https://github.com/spack/spack) >= 1.
   - Forks: `~/spack-<fork>` and `~/spack-packages-<fork>`
 - **Automated environment creation** with compiler and Python version constraints
 - **Auto-naming**: Generate environment names from toolchain specs (e.g., `geos-gcc15-py312`)
+- **Compiler version enforcement**: Guarantees a known-good compiler is present before proceeding
+  - **macOS**: Apple clang >= 17 and Homebrew gfortran 14.2.x or 15.2.x required
+  - **Linux**: GCC 14.2.x or 15.2.x required
+- **Auto-compiler selection**: Highest trusted compiler auto-selected for new environments when no `--compiler` is given
 - **Apple Silicon target auto-resolution**: Chooses a safe default target from host architecture and Apple clang capability
 - **Target query modes**: Print resolved target during `env-create` or query it without making changes
 - **Sandbox mode**: Isolate installations for testing without affecting your main setup
@@ -25,8 +29,17 @@ A macOS-focused bootstrap tool for [Spack](https://github.com/spack/spack) >= 1.
 
 ## Prerequisites
 
-- **macOS** (Darwin platform)
+### macOS
 - **Homebrew**: The script can help you install it in a non-admin location
+- **Xcode Command Line Tools** with Apple clang >= 17 (`xcode-select --install`)
+- **Homebrew gcc** 14.2.x or 15.2.x for Fortran (`brew install gcc@15`)
+- **Git**: For cloning repositories
+- **SSH keys**: Set up for GitHub access (`git@github.com`)
+
+### Linux
+- **GCC** 14.2.x or 15.2.x (including `gfortran`)
+  - Debian/Ubuntu: `sudo apt install gcc-15 gfortran-15`
+  - RHEL/Fedora: `sudo dnf install gcc gcc-gfortran`
 - **Git**: For cloning repositories
 - **SSH keys**: Set up for GitHub access (`git@github.com`)
 
@@ -360,6 +373,46 @@ Or for MAPL:
   --compiler gcc@15 --spec mapl
 ```
 
+## After `spack install` Succeeds
+
+Once `spack install` finishes (all dependencies are built), the workflow is:
+
+### 1. Load the environment
+
+```bash
+spack load geosgcm-deps
+```
+
+This sets `PATH`, `CMAKE_PREFIX_PATH`, `CC`, `CXX`, `FC`, and all other relevant variables in your current shell so that CMake and compilers are ready to use.
+
+### 2. Clone and build GEOSgcm
+
+```bash
+cd ~/GEOSgcm   # (or wherever your checkout lives)
+mepo clone
+mkdir build && cd build
+cmake ..
+make -j install
+```
+
+`CC`, `CXX`, and `FC` are set automatically by `spack load` (or by the `envvariables` block written into `spack.yaml` by this script), so CMake picks the correct compilers without any manual export.
+
+### 3. Re-entering the environment in a new shell
+
+Every time you open a new terminal, re-activate before building:
+
+```bash
+source ~/spack-mathomp4/share/spack/setup-env.sh   # adjust path for your fork
+spack env activate geos-gcc15-py312                  # your environment name
+spack load geosgcm-deps
+```
+
+### Notes
+
+- **`spack install` vs `spack install --only dependencies`**: When the spec is `geosgcm-deps` (a `BundlePackage`, the default), use plain `spack install`. When the spec is `geosgcm` or another non-bundle package, use `spack install --only dependencies` (GEOSgcm itself is built from source via CMake, not by Spack).
+- **Rebuilding after source changes**: Just re-run `make -j install` inside your `build/` directory. No need to touch Spack unless you need to add or update a dependency.
+- **Updating a dependency**: Run `spack concretize -f && spack install` inside the activated environment, then `spack load geosgcm-deps` again to refresh your shell.
+
 ## Compiler Configuration on macOS
 
 On macOS, the recommended practice is to use:
@@ -602,8 +655,20 @@ Set to `6` parallel jobs by default.
 ### Environments Root
 Set to `~/spack-envs` (or `<sandbox>/spack-envs` in sandbox mode).
 
-### Compiler Detection
-Automatically finds all available compilers using `spack compiler find`.
+### Compiler Detection and Version Enforcement
+
+Before running `spack compiler find`, the script checks that a trusted compiler is available:
+
+**macOS:**
+- **Apple clang >= 17** must be present (from Xcode / Command Line Tools). If the detected version is older, the script exits with update instructions.
+- **Homebrew gfortran 14.2.x or 15.2.x** must be present. If none is found, the script exits with `brew install gcc@15` instructions.
+- The highest trusted gfortran version is auto-selected for new environments when no `--compiler` is specified.
+
+**Linux:**
+- **GCC 14.2.x or 15.2.x** (with gfortran) must be present. The script scans `PATH` for both plain `gcc` and versioned `gcc-N` binaries. If none qualifies, the script exits with `apt`/`dnf` install instructions.
+- The highest trusted GCC version is auto-selected for new environments when no `--compiler` is specified.
+
+Trusted version sets are defined as constants near the top of the script (`MACOS_MIN_APPLE_CLANG_MAJOR`, `MACOS_TRUSTED_GFORTRAN_VERSIONS`, `LINUX_TRUSTED_GCC_VERSIONS`) and can be updated as new compiler releases are validated.
 
 ### External Packages
 Finds external packages but **excludes**: `bison`, `openssl`, `gmake`, `m4`, `curl`, `python`, `gettext`, `perl`, `meson`.
@@ -687,7 +752,37 @@ This occurs when using `--compiler apple-clang@17` alone. Apple's compiler suite
 
 ### Compiler environment variables (CC, CXX, FC)
 
-Every environment created by this script includes `CC`, `CXX`, and `FC` in its `spack.yaml`. These are needed when you build GEOSgcm from source outside Spack — CMake reads them to select the right compilers. Paths are read directly from Spack's `packages.yaml` (written by `spack external find` during `config`/`setup`), so they reflect exactly what Spack detected — not PATH order. When no `--compiler` flag is given on macOS, the defaults are apple-clang for C/C++ and the highest available Homebrew gcc for Fortran.
+Every environment created by this script includes `CC`, `CXX`, and `FC` in its `spack.yaml`. These are needed when you build GEOSgcm from source outside Spack — CMake reads them to select the right compilers. Paths are read directly from Spack's `packages.yaml` (written by `spack external find` during `config`/`setup`), so they reflect exactly what Spack detected — not PATH order.
+
+When no `--compiler` flag is given:
+- **macOS**: apple-clang for C/C++ and the highest trusted Homebrew gcc for Fortran.
+- **Linux**: the highest trusted GCC version for all languages.
+
+### No trusted compiler found (macOS or Linux)
+
+If you see an error like:
+```
+ERROR: No trusted Homebrew gfortran found on this macOS system.
+```
+or:
+```
+ERROR: No trusted GCC found on this Linux system.
+```
+
+Install a supported compiler version:
+- **macOS**: `brew install gcc@15` (provides gfortran-15 / gcc-15 at 15.2.x)
+- **Linux (Debian/Ubuntu)**: `sudo apt install gcc-15 gfortran-15`
+- **Linux (RHEL/Fedora)**: `sudo dnf install gcc gcc-gfortran`
+
+If you see:
+```
+ERROR: Apple clang N is too old.
+```
+Update Xcode / Command Line Tools:
+```bash
+sudo softwareupdate -i -a
+xcode-select --install
+```
 
 This is a workaround for [Spack bug #51855](https://github.com/spack/spack/issues/51855).
 
