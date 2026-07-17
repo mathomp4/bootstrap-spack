@@ -998,12 +998,15 @@ Then re-run:
 def ensure_brew_prereqs(brew: str, *, dry_run: bool) -> None:
     eprint("==> Ensuring Homebrew prerequisites (no modulefiles)...")
     for pkg in BREW_PKGS:
-        r = run([brew, "list", "--formula", pkg], dry_run=dry_run, check=False)
+        if dry_run:
+            eprint(f"[dry-run] would check/install brew package: {pkg}")
+            continue
+        r = run([brew, "list", "--formula", pkg], dry_run=False, check=False)
         if r.returncode == 0:
             eprint(f"==> brew: {pkg} already installed")
         else:
             eprint(f"==> brew: installing {pkg}")
-            run([brew, "install", pkg], dry_run=dry_run)
+            run([brew, "install", pkg], dry_run=False)
 
 
 def git_clone_if_missing(url: str, dest: Path, *, dry_run: bool) -> None:
@@ -1011,7 +1014,10 @@ def git_clone_if_missing(url: str, dest: Path, *, dry_run: bool) -> None:
         eprint(f"==> Repo already cloned: {dest}")
         return
     eprint(f"==> Cloning {url} -> {dest}")
-    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dry_run:
+        eprint(f"[dry-run] would mkdir {dest.parent}")
+    else:
+        dest.parent.mkdir(parents=True, exist_ok=True)
     run(
         ["git", "clone", "-c", "feature.manyFiles=true", url, str(dest)],
         dry_run=dry_run,
@@ -1191,7 +1197,10 @@ def ensure_repos(
     )
 
     user_cfg = spack_user_cfg_dir_from_env(sandbox)
-    user_cfg.mkdir(parents=True, exist_ok=True)
+    if dry_run:
+        eprint(f"[dry-run] would mkdir {user_cfg}")
+    else:
+        user_cfg.mkdir(parents=True, exist_ok=True)
     repos_yaml = user_cfg / "repos.yaml"
     eprint(f"==> Writing {repos_yaml}")
     content = f"""repos:
@@ -1415,7 +1424,10 @@ def ensure_config(
         )
 
     user_cfg = spack_user_cfg_dir_from_env(sandbox)
-    user_cfg.mkdir(parents=True, exist_ok=True)
+    if dry_run:
+        eprint(f"[dry-run] would mkdir {user_cfg}")
+    else:
+        user_cfg.mkdir(parents=True, exist_ok=True)
 
     # Write packages:all:target if a target override is needed (explicit request
     # or Apple clang forced a downgrade below the host target).
