@@ -1596,7 +1596,10 @@ def create_env(
     compiler_suffix = ""
     if c_spec and fortran_spec:
         # Both C/C++ and Fortran specified
-        if is_mac_os() and fortran_spec.startswith("gcc"):
+        if c_spec == fortran_spec:
+            # Same compiler for everything — no language splitting needed
+            compiler_suffix = f" %{c_spec}"
+        elif is_mac_os() and fortran_spec.startswith("gcc"):
             # macOS with gcc for Fortran: use conditional constraints to apply correct compiler per language
             compiler_suffix = f" %[when='%c'] c={c_spec} %[when='%cxx'] cxx={c_spec} %[when='%fortran'] fortran={fortran_spec}"
         else:
