@@ -728,7 +728,7 @@ def print_minimal_advice(
             eprint("")
         eprint("Next steps:")
         eprint("  spack env list")
-        eprint(f"  spack env activate {env_name}")
+        eprint(f"  spack env activate -p {env_name}")
         eprint("  spack concretize")
         if _spec_is_bundle(spec):
             # BundlePackages have no build phase; plain 'spack install' is correct.

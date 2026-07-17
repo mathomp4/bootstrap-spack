@@ -288,7 +288,7 @@ Follow these instructions, then use Spack normally:
 export SPACK_USER_CONFIG_PATH="$HOME/spack-testing/.spack"
 source "$HOME/spack-testing/spack-official/share/spack/setup-env.sh"
 spack env list
-spack env activate geos-gcc15-py312
+spack env activate -p geos-gcc15-py312
 spack concretize
 spack install
 ```
@@ -336,7 +336,7 @@ The default spec is `geosgcm-deps`, a Spack `BundlePackage` that declares all of
 
 # Activate and install
 source ~/spack-mathomp4/share/spack/setup-env.sh
-spack env activate geos-gcc15-py312
+spack env activate -p geos-gcc15-py312
 spack concretize
 spack install
 
@@ -401,7 +401,7 @@ Every time you open a new terminal, re-activate before building:
 
 ```bash
 source ~/spack-mathomp4/share/spack/setup-env.sh   # adjust path for your fork
-spack env activate geos-gcc15-py312                  # your environment name
+spack env activate -p geos-gcc15-py312                  # your environment name
 spack load geosgcm-deps
 ```
 
@@ -475,7 +475,7 @@ Then activate Spack:
 ```bash
 source ~/spack-mathomp4/share/spack/setup-env.sh
 spack env list
-spack env activate geos
+spack env activate -p geos
 spack concretize
 spack install
 spack load geosgcm-deps
@@ -486,7 +486,7 @@ spack load geosgcm-deps
 ```bash
 ./bootstrap_spack.py --spack mathomp4 env-create --auto-name --compiler apple-clang@17 --python 3.11
 source ~/spack-mathomp4/share/spack/setup-env.sh
-spack env activate geos-appleclang17-py311
+spack env activate -p geos-appleclang17-py311
 spack concretize
 spack install
 spack load geosgcm-deps
@@ -498,7 +498,7 @@ spack load geosgcm-deps
 ./bootstrap_spack.py --spack mathomp4 env-create --auto-name \
   --compiler gcc@15 --python 3.12 --target x86_64_v3
 source ~/spack-mathomp4/share/spack/setup-env.sh
-spack env activate geos-gcc15-py312
+spack env activate -p geos-gcc15-py312
 spack concretize
 spack install
 spack load geosgcm-deps
@@ -510,7 +510,7 @@ spack load geosgcm-deps
 ./bootstrap_spack.py --spack mathomp4 env-create --auto-name \
   --compiler gcc@15 --python 3.12 --python-optimizations
 source ~/spack-mathomp4/share/spack/setup-env.sh
-spack env activate geos-gcc15-py312
+spack env activate -p geos-gcc15-py312
 spack concretize
 spack install
 spack load geosgcm-deps
@@ -530,7 +530,7 @@ spack load geosgcm-deps
 # Use it
 export SPACK_USER_CONFIG_PATH="/tmp/test-spack/.spack"
 source "/tmp/test-spack/spack-myusername/share/spack/setup-env.sh"
-spack env activate geos-gcc15
+spack env activate -p geos-gcc15
 spack concretize
 spack install
 spack load geosgcm-deps
@@ -563,7 +563,7 @@ This backs up your old config, removes it, then regenerates everything.
 
 # Activate and install
 source ~/spack-mathomp4/share/spack/setup-env.sh
-spack env activate geos-gcc15-py312
+spack env activate -p geos-gcc15-py312
 spack concretize
 spack install
 
