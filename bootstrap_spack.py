@@ -383,22 +383,16 @@ def find_compiler_paths_from_packages_yaml(
     return env_vars
 
 
-# Only trust specific patch-level releases. A version is acceptable when its
-# (major, minor) pair is in this set.  Add new entries as they are validated.
-LINUX_TRUSTED_GCC_VERSIONS: set[tuple[int, int]] = {
-    (14, 2),
-    (15, 2),
-}
+# Trusted GCC versions on Linux: any patch release where major.minor >= the
+# listed minimum.  E.g. (14, 2) accepts 14.2.x, 14.3.x, … but not 14.1.x.
+LINUX_TRUSTED_GCC_MIN_VERSIONS: dict[int, int] = {14: 2, 15: 2}
 
 # Minimum Apple clang major version required on macOS.
 MACOS_MIN_APPLE_CLANG_MAJOR: int = 17
 
-# Trusted (major, minor) pairs for Homebrew gfortran / gcc on macOS.
-# Must match a supported GCC release that ships a working Fortran compiler.
-MACOS_TRUSTED_GFORTRAN_VERSIONS: set[tuple[int, int]] = {
-    (14, 2),
-    (15, 2),
-}
+# Trusted Homebrew gfortran / gcc versions on macOS: same rule as Linux —
+# any patch release where major.minor >= the listed minimum.
+MACOS_TRUSTED_GFORTRAN_MIN_VERSIONS: dict[int, int] = {14: 2, 15: 2}
 
 
 def _gcc_full_version(gcc_bin: str) -> tuple[int, int, int] | None:
@@ -428,9 +422,10 @@ def _gcc_full_version(gcc_bin: str) -> tuple[int, int, int] | None:
         return None
 
 
-def _is_trusted_gcc(ver: tuple[int, int, int]) -> bool:
-    """Return True when (major, minor) appears in LINUX_TRUSTED_GCC_VERSIONS."""
-    return (ver[0], ver[1]) in LINUX_TRUSTED_GCC_VERSIONS
+def _is_trusted_gcc(ver: tuple[int, int, int], trusted: dict[int, int]) -> bool:
+    """Return True when ver's major is in *trusted* and minor >= the minimum for that major."""
+    min_minor = trusted.get(ver[0])
+    return min_minor is not None and ver[1] >= min_minor
 
 
 def detect_linux_gcc_versions() -> list[tuple[tuple[int, int, int], str]]:
@@ -440,8 +435,8 @@ def detect_linux_gcc_versions() -> list[tuple[tuple[int, int, int], str]]:
     Probes both versioned names (gcc-14, gcc-15, …) and the plain 'gcc'
     binary (for distros that ship a single compiler without numbered symlinks).
 
-    A version is "trusted" when its (major, minor) is in
-    LINUX_TRUSTED_GCC_VERSIONS (currently 14.2.x and 15.2.x).
+    A version is "trusted" when its major is in LINUX_TRUSTED_GCC_MIN_VERSIONS
+    and its minor >= the minimum for that major (e.g. >= 14.2, >= 15.2).
 
     Returns a list of ((major, minor, patch), gcc_binary_path) tuples,
     sorted ascending by version, with duplicates removed.
@@ -461,7 +456,7 @@ def detect_linux_gcc_versions() -> list[tuple[tuple[int, int, int], str]]:
             ver = _gcc_full_version(str(entry))
             if ver is None:
                 continue
-            if not _is_trusted_gcc(ver):
+            if not _is_trusted_gcc(ver, LINUX_TRUSTED_GCC_MIN_VERSIONS):
                 continue
             # Keep the first PATH occurrence for each version tuple
             if ver not in candidates:
@@ -472,33 +467,33 @@ def detect_linux_gcc_versions() -> list[tuple[tuple[int, int, int], str]]:
 
 def require_linux_gcc(*, dry_run: bool) -> str:
     """
-    Ensure at least one trusted GCC (see LINUX_TRUSTED_GCC_VERSIONS) is
+    Ensure at least one trusted GCC (see LINUX_TRUSTED_GCC_MIN_VERSIONS) is
     available on Linux.  Returns a Spack compiler spec string for the highest
-    qualifying version (e.g. 'gcc@15.2.0').
+    qualifying version (e.g. 'gcc@15.3.0').
     Raises SystemExit if none is found (unless dry_run).
     """
     if dry_run:
-        trusted_str = ", ".join(f"{maj}.{mn}.x" for maj, mn in sorted(LINUX_TRUSTED_GCC_VERSIONS))
+        trusted_str = ", ".join(
+            f">= {maj}.{mn}" for maj, mn in sorted(LINUX_TRUSTED_GCC_MIN_VERSIONS.items())
+        )
         eprint(f"[dry-run] would check for trusted GCC ({trusted_str}) on Linux")
         return "gcc@14.2.0"
 
     versions = detect_linux_gcc_versions()
     if not versions:
-        trusted_str = " or ".join(
-            f">= {maj}.{mn}" for maj, mn in sorted(LINUX_TRUSTED_GCC_VERSIONS)
+        example_major = max(LINUX_TRUSTED_GCC_MIN_VERSIONS)
+        example_minor = LINUX_TRUSTED_GCC_MIN_VERSIONS[example_major]
+        trusted_str = ", ".join(
+            f">= {maj}.{mn}" for maj, mn in sorted(LINUX_TRUSTED_GCC_MIN_VERSIONS.items())
         )
-        example_major = max(maj for maj, _ in LINUX_TRUSTED_GCC_VERSIONS)
-        example_minor = max(mn for maj, mn in LINUX_TRUSTED_GCC_VERSIONS if maj == example_major)
         raise SystemExit(
-            "ERROR: No trusted GCC found on this Linux system.\n"
-            "       Trusted versions require (major, minor) in: "
-            + str({f"{maj}.{mn}" for maj, mn in LINUX_TRUSTED_GCC_VERSIONS})
-            + f"\n"
+            f"ERROR: No trusted GCC found on this Linux system.\n"
+            f"       Trusted versions: {trusted_str}\n"
             f"       e.g.:  sudo apt install gcc-{example_major} gfortran-{example_major}  # Debian/Ubuntu\n"
             f"              sudo dnf install gcc-{example_major} gcc-gfortran              # RHEL/Fedora\n"
             f"\n"
             f"       If you have GCC installed as plain 'gcc', ensure 'gcc --version'\n"
-            f"       reports a trusted version (e.g., {example_major}.{example_minor}.x)."
+            f"       reports a trusted version (e.g., {example_major}.{example_minor}+)."
         )
 
     highest_ver, highest_path = versions[-1]
@@ -542,7 +537,7 @@ def _detect_macos_gfortran_versions() -> list[tuple[tuple[int, int, int], str]]:
 
     Probes ``gfortran``, ``gfortran-N``, ``gcc-N`` (gcc also ships gfortran
     on Homebrew) using ``--version``.  Filters against
-    MACOS_TRUSTED_GFORTRAN_VERSIONS and returns a sorted ascending list of
+    MACOS_TRUSTED_GFORTRAN_MIN_VERSIONS and returns a sorted ascending list of
     ``((major, minor, patch), binary_path)`` tuples with duplicates removed.
     """
     candidates: dict[tuple[int, int, int], str] = {}
@@ -563,7 +558,7 @@ def _detect_macos_gfortran_versions() -> list[tuple[tuple[int, int, int], str]]:
             ver = _gcc_full_version(str(entry))
             if ver is None:
                 continue
-            if (ver[0], ver[1]) not in MACOS_TRUSTED_GFORTRAN_VERSIONS:
+            if not _is_trusted_gcc(ver, MACOS_TRUSTED_GFORTRAN_MIN_VERSIONS):
                 continue
             if ver not in candidates:
                 candidates[ver] = str(entry)
@@ -576,10 +571,10 @@ def require_macos_compilers(*, dry_run: bool) -> str:
     On macOS, verify:
       1. Apple clang >= MACOS_MIN_APPLE_CLANG_MAJOR (currently 17) is available.
       2. At least one trusted Homebrew gfortran/gcc is available
-         (MACOS_TRUSTED_GFORTRAN_VERSIONS: currently 14.2.x or 15.2.x).
+         (MACOS_TRUSTED_GFORTRAN_MIN_VERSIONS: major 14 >= 14.2, major 15 >= 15.2).
 
     Returns a Spack compiler spec string for the highest qualifying gfortran
-    version (e.g. ``'gcc@15.2.0'``), which callers use to auto-select the
+    version (e.g. ``'gcc@15.3.0'``), which callers use to auto-select the
     Fortran compiler for environment creation.
 
     Raises SystemExit with actionable instructions if either check fails,
@@ -587,7 +582,7 @@ def require_macos_compilers(*, dry_run: bool) -> str:
     """
     if dry_run:
         trusted_str = ", ".join(
-            f"{maj}.{mn}.x" for maj, mn in sorted(MACOS_TRUSTED_GFORTRAN_VERSIONS)
+            f">= {maj}.{mn}" for maj, mn in sorted(MACOS_TRUSTED_GFORTRAN_MIN_VERSIONS.items())
         )
         eprint(
             f"[dry-run] would check Apple clang >= {MACOS_MIN_APPLE_CLANG_MAJOR}"
@@ -619,9 +614,9 @@ def require_macos_compilers(*, dry_run: bool) -> str:
     # --- Homebrew gfortran check ---
     gfort_versions = _detect_macos_gfortran_versions()
     if not gfort_versions:
-        example_major = max(maj for maj, _ in MACOS_TRUSTED_GFORTRAN_VERSIONS)
-        trusted_str = " or ".join(
-            f"{maj}.{mn}.x" for maj, mn in sorted(MACOS_TRUSTED_GFORTRAN_VERSIONS)
+        example_major = max(MACOS_TRUSTED_GFORTRAN_MIN_VERSIONS)
+        trusted_str = ", ".join(
+            f">= {maj}.{mn}" for maj, mn in sorted(MACOS_TRUSTED_GFORTRAN_MIN_VERSIONS.items())
         )
         raise SystemExit(
             f"ERROR: No trusted Homebrew gfortran found on this macOS system.\n"
@@ -1356,9 +1351,9 @@ def ensure_config(
     """
     Configure Spack: build_jobs, environments_root, compilers, externals, concretizer.
 
-    On Linux, also enforces a trusted GCC version (see LINUX_TRUSTED_GCC_VERSIONS).
+    On Linux, also enforces a trusted GCC version (see LINUX_TRUSTED_GCC_MIN_VERSIONS).
     On macOS, enforces Apple clang >= MACOS_MIN_APPLE_CLANG_MAJOR and a trusted
-    Homebrew gfortran version (see MACOS_TRUSTED_GFORTRAN_VERSIONS).
+    Homebrew gfortran version (see MACOS_TRUSTED_GFORTRAN_MIN_VERSIONS).
 
     Returns the highest qualifying compiler spec (e.g. 'gcc@15.2.0') so callers
     can auto-select it for environment creation.  Returns None when not applicable.
@@ -1383,7 +1378,7 @@ def ensure_config(
         sandbox=sandbox,
     )
 
-    # On Linux, enforce a trusted GCC version (LINUX_TRUSTED_GCC_VERSIONS) before
+    # On Linux, enforce a trusted GCC version (LINUX_TRUSTED_GCC_MIN_VERSIONS) before
     # finding compilers. This also returns the spec for the highest qualifying
     # version so main() can auto-select it for environment creation.
     compiler_spec: str | None = None
