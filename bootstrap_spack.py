@@ -740,9 +740,8 @@ def print_minimal_advice(
             eprint("Then build GEOSgcm from your local source tree:")
             eprint("  cd ~/GEOSgcm   # (or wherever your checkout lives)")
             eprint("  mepo clone")
-            eprint("  mkdir build && cd build")
-            eprint("  cmake ..")
-            eprint("  make -j install")
+            eprint("  cmake -B build")
+            eprint("  cmake --build build --target install -j")
         else:
             eprint("  spack install --only dependencies")
         eprint("")

@@ -346,9 +346,8 @@ spack load geosgcm-deps
 # Now build GEOSgcm from your local source
 cd ~/GEOSgcm
 mepo clone
-mkdir build && cd build
-cmake ..
-make install
+cmake -B build
+cmake --build build --target install -j
 ```
 
 **The output will tell you what is being installed:**
@@ -390,9 +389,8 @@ This sets `PATH`, `CMAKE_PREFIX_PATH`, `CC`, `CXX`, `FC`, and all other relevant
 ```bash
 cd ~/GEOSgcm   # (or wherever your checkout lives)
 mepo clone
-mkdir build && cd build
-cmake ..
-make -j install
+cmake -B build
+cmake --build build --target install -j
 ```
 
 `CC`, `CXX`, and `FC` are set automatically by `spack load` (or by the `envvariables` block written into `spack.yaml` by this script), so CMake picks the correct compilers without any manual export.
@@ -410,7 +408,7 @@ spack load geosgcm-deps
 ### Notes
 
 - **`spack install` vs `spack install --only dependencies`**: When the spec is `geosgcm-deps` (a `BundlePackage`, the default), use plain `spack install`. When the spec is `geosgcm` or another non-bundle package, use `spack install --only dependencies` (GEOSgcm itself is built from source via CMake, not by Spack).
-- **Rebuilding after source changes**: Just re-run `make -j install` inside your `build/` directory. No need to touch Spack unless you need to add or update a dependency.
+- **Rebuilding after source changes**: Just re-run `cmake --build build --target install -j` from the repo root. No need to touch Spack unless you need to add or update a dependency.
 - **Updating a dependency**: Run `spack concretize -f && spack install` inside the activated environment, then `spack load geosgcm-deps` again to refresh your shell.
 
 ## Compiler Configuration on macOS
@@ -575,9 +573,8 @@ spack load geosgcm-deps
 # Now build GEOSgcm from your local source (CC/CXX/FC are already set)
 cd ~/GEOSgcm
 mepo clone
-mkdir build && cd build
-cmake ..
-make install
+cmake -B build
+cmake --build build --target install -j
 ```
 
 ## Dry-run Mode
