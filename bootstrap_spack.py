@@ -385,14 +385,14 @@ def find_compiler_paths_from_packages_yaml(
 
 # Trusted GCC versions on Linux: any patch release where major.minor >= the
 # listed minimum.  E.g. (14, 2) accepts 14.2.x, 14.3.x, … but not 14.1.x.
-LINUX_TRUSTED_GCC_MIN_VERSIONS: dict[int, int] = {14: 2, 15: 2}
+LINUX_TRUSTED_GCC_MIN_VERSIONS: dict[int, int] = {14: 2, 15: 2, 16: 1}
 
 # Minimum Apple clang major version required on macOS.
 MACOS_MIN_APPLE_CLANG_MAJOR: int = 17
 
 # Trusted Homebrew gfortran / gcc versions on macOS: same rule as Linux —
 # any patch release where major.minor >= the listed minimum.
-MACOS_TRUSTED_GFORTRAN_MIN_VERSIONS: dict[int, int] = {14: 2, 15: 2}
+MACOS_TRUSTED_GFORTRAN_MIN_VERSIONS: dict[int, int] = {14: 2, 15: 2, 16: 1}
 
 
 def _gcc_full_version(gcc_bin: str) -> tuple[int, int, int] | None:
