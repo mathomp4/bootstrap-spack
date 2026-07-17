@@ -14,8 +14,8 @@ A bootstrap tool for [Spack](https://github.com/spack/spack) >= 1.2 with intelli
 - **Automated environment creation** with compiler and Python version constraints
 - **Auto-naming**: Generate environment names from toolchain specs (e.g., `geos-gcc15-py312`)
 - **Compiler version enforcement**: Guarantees a known-good compiler is present before proceeding
-  - **macOS**: Apple clang >= 17 and Homebrew gfortran 14.2.x or 15.2.x required
-  - **Linux**: GCC 14.2.x or 15.2.x required
+  - **macOS**: Apple clang >= 17 and Homebrew gfortran >= 14.2 (GCC 14, 15, or 16) required
+  - **Linux**: GCC >= 14.2 (GCC 14, 15, or 16) required
 - **Auto-compiler selection**: Highest trusted compiler auto-selected for new environments when no `--compiler` is given
 - **Apple Silicon target auto-resolution**: Chooses a safe default target from host architecture and Apple clang capability
 - **Target query modes**: Print resolved target during `env-create` or query it without making changes
@@ -32,13 +32,13 @@ A bootstrap tool for [Spack](https://github.com/spack/spack) >= 1.2 with intelli
 ### macOS
 - **Homebrew**: The script can help you install it in a non-admin location
 - **Xcode Command Line Tools** with Apple clang >= 17 (`xcode-select --install`)
-- **Homebrew gcc** 14.2.x or 15.2.x for Fortran (`brew install gcc@15`)
+- **Homebrew gcc** >= 14.2 for Fortran (`brew install gcc@16`)
 - **Git**: For cloning repositories
 - **SSH keys**: Set up for GitHub access (`git@github.com`)
 
 ### Linux
-- **GCC** 14.2.x or 15.2.x (including `gfortran`)
-  - Debian/Ubuntu: `sudo apt install gcc-15 gfortran-15`
+- **GCC** >= 14.2 (including `gfortran`) — GCC 14, 15, or 16
+  - Debian/Ubuntu: `sudo apt install gcc-16 gfortran-16`
   - RHEL/Fedora: `sudo dnf install gcc gcc-gfortran`
 - **Git**: For cloning repositories
 - **SSH keys**: Set up for GitHub access (`git@github.com`)
@@ -658,14 +658,14 @@ Before running `spack compiler find`, the script checks that a trusted compiler 
 
 **macOS:**
 - **Apple clang >= 17** must be present (from Xcode / Command Line Tools). If the detected version is older, the script exits with update instructions.
-- **Homebrew gfortran 14.2.x or 15.2.x** must be present. If none is found, the script exits with `brew install gcc@15` instructions.
+- **Homebrew gcc >= 14.2** (GCC 14, 15, or 16) must be present. If none is found, the script exits with `brew install gcc@16` instructions.
 - The highest trusted gfortran version is auto-selected for new environments when no `--compiler` is specified.
 
 **Linux:**
-- **GCC 14.2.x or 15.2.x** (with gfortran) must be present. The script scans `PATH` for both plain `gcc` and versioned `gcc-N` binaries. If none qualifies, the script exits with `apt`/`dnf` install instructions.
+- **GCC >= 14.2** (GCC 14, 15, or 16, with gfortran) must be present. The script scans `PATH` for both plain `gcc` and versioned `gcc-N` binaries. If none qualifies, the script exits with `apt`/`dnf` install instructions.
 - The highest trusted GCC version is auto-selected for new environments when no `--compiler` is specified.
 
-Trusted version sets are defined as constants near the top of the script (`MACOS_MIN_APPLE_CLANG_MAJOR`, `MACOS_TRUSTED_GFORTRAN_VERSIONS`, `LINUX_TRUSTED_GCC_VERSIONS`) and can be updated as new compiler releases are validated.
+Trusted version sets are defined as constants near the top of the script (`MACOS_MIN_APPLE_CLANG_MAJOR`, `MACOS_TRUSTED_GFORTRAN_MIN_VERSIONS`, `LINUX_TRUSTED_GCC_MIN_VERSIONS`) and can be updated as new compiler releases are validated.
 
 ### External Packages
 Finds external packages but **excludes**: `bison`, `openssl`, `gmake`, `m4`, `curl`, `python`, `gettext`, `perl`, `meson`.
@@ -767,8 +767,8 @@ ERROR: No trusted GCC found on this Linux system.
 ```
 
 Install a supported compiler version:
-- **macOS**: `brew install gcc@15` (provides gfortran-15 / gcc-15 at 15.2.x)
-- **Linux (Debian/Ubuntu)**: `sudo apt install gcc-15 gfortran-15`
+- **macOS**: `brew install gcc@16` (provides gfortran-16 / gcc-16 at 16.1+)
+- **Linux (Debian/Ubuntu)**: `sudo apt install gcc-16 gfortran-16`
 - **Linux (RHEL/Fedora)**: `sudo dnf install gcc gcc-gfortran`
 
 If you see:
