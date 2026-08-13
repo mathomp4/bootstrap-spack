@@ -15,6 +15,7 @@ SUBCOMMANDS:
   setup         Complete setup: brew + spack + repos + config (but no environment)
   env           Create default starter environment (geos)
   env-create    Create a custom named/configured environment with compiler/Python pins
+  fetch         Pre-fetch source tarballs for environment dependencies (for offline builds)
   reset         Backup and remove user-scope config files (repos.yaml, packages.yaml, etc.)
   config-clean  Reset config, then rebuild repos and config from scratch
   all           Full bootstrap: brew + spack + repos + config + env (DEFAULT)
@@ -707,6 +708,7 @@ def print_minimal_advice(
     env_name: str | None = None,
     sandbox: Path | None = None,
     spec: str | None = None,
+    fetched: bool = False,
 ) -> None:
     eprint("")
     eprint("=" * 64)
@@ -724,7 +726,12 @@ def print_minimal_advice(
         eprint("Next steps:")
         eprint("  spack env list")
         eprint(f"  spack env activate -p {env_name}")
-        eprint("  spack concretize")
+        if not fetched:
+            eprint("  spack concretize")
+        else:
+            eprint("  # Sources are pre-fetched; ready to build offline on compute nodes")
+
+        spec_base = spec.split()[0].split("%")[0].split("@")[0].strip() if spec else ""
         if _spec_is_bundle(spec):
             # BundlePackages have no build phase; plain 'spack install' is correct.
             eprint("  spack install")
@@ -737,8 +744,10 @@ def print_minimal_advice(
             eprint("  mepo clone")
             eprint("  cmake -B build")
             eprint("  cmake --build build --target install -j")
-        else:
+        elif spec_base in ("geosgcm", "mapl"):
             eprint("  spack install --only dependencies")
+        else:
+            eprint("  spack install")
         eprint("")
     eprint("=" * 64)
     eprint("")
@@ -1713,6 +1722,29 @@ def create_env(
     eprint(f"==> Wrote {spack_yaml}")
 
 
+def fetch_env_sources(
+    spack_root: str,
+    env_dir: Path,
+    *,
+    dry_run: bool,
+    sandbox: Path | None = None,
+) -> None:
+    """Pre-fetch all source tarballs for an environment's dependencies."""
+    spack_yaml = env_dir / "spack.yaml"
+    if not spack_yaml.exists() and not dry_run:
+        eprint(f"ERROR: Environment directory {env_dir} does not contain a spack.yaml file.")
+        sys.exit(1)
+
+    eprint(f"==> Pre-fetching source tarballs for environment: {env_dir}")
+    spack_run(
+        spack_root,
+        ["--env-dir", str(env_dir), "fetch", "--dependencies"],
+        dry_run=dry_run,
+        check=True,
+        sandbox=sandbox,
+    )
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="""
@@ -1896,6 +1928,25 @@ EXAMPLES:
         help="Enable a merged filesystem view in the environment (default: disabled). "
         "Useful if you need a single prefix tree, but adds overhead for bundle packages.",
     )
+    p_envc.add_argument(
+        "--fetch",
+        action="store_true",
+        default=False,
+        help="Pre-fetch source tarballs for environment dependencies after creation (for offline builds on compute nodes)",
+    )
+
+    # fetch: pre-fetch source tarballs for environment dependencies (for offline builds)
+    p_fetch = sub.add_parser(
+        "fetch",
+        help="Pre-fetch source tarballs for an environment's dependencies (useful for offline compute nodes)",
+        description="Pre-fetch all source tarballs for an environment's dependencies into Spack's cache for offline builds.",
+    )
+    p_fetch.add_argument("--name", default="geos", help="Environment name (default: geos)")
+    p_fetch.add_argument(
+        "--env-dir",
+        default=None,
+        help="Explicit path to environment directory (overrides --name)",
+    )
 
     p.set_defaults(cmd="all")
     return p.parse_args(argv)
@@ -1980,6 +2031,7 @@ def main(argv: list[str]) -> int:
         "reset",
         "config-clean",
         "env-create",
+        "fetch",
     ):
         ensure_spack(spack_root, layout["spack_repo"], dry_run=dry_run, sandbox=sandbox)
 
@@ -1991,7 +2043,7 @@ def main(argv: list[str]) -> int:
         if cmd == "reset":
             return 0
 
-    if cmd in ("all", "repos", "setup", "config-clean", "env-create"):
+    if cmd in ("all", "repos", "setup", "config-clean", "env-create", "fetch"):
         ensure_repos(
             spack_root,
             spack_packages_dir,
@@ -2002,7 +2054,7 @@ def main(argv: list[str]) -> int:
         if cmd == "repos":
             return 0
 
-    if cmd in ("all", "config", "setup", "config-clean", "env-create"):
+    if cmd in ("all", "config", "setup", "config-clean", "env-create", "fetch"):
         auto_compiler_spec = ensure_config(
             spack_root,
             dry_run=dry_run,
@@ -2014,6 +2066,16 @@ def main(argv: list[str]) -> int:
         if cmd == "setup":
             print_minimal_advice(spack_root, None, sandbox)
             return 0
+
+    if cmd == "fetch":
+        base = sandbox if sandbox else Path.home()
+        if getattr(args, "env_dir", None):
+            env_path = Path(args.env_dir).expanduser().resolve()
+        else:
+            env_name = getattr(args, "name", "geos")
+            env_path = base / "spack-envs" / env_name
+        fetch_env_sources(spack_root, env_path, dry_run=dry_run, sandbox=sandbox)
+        return 0
 
     if cmd in ("all", "env", "env-create"):
         # Managed environments live under environments_root (we set this to ~/spack-envs or <sandbox>/spack-envs).
@@ -2083,9 +2145,14 @@ def main(argv: list[str]) -> int:
             view=view,
         )
 
+        if getattr(args, "fetch", False):
+            fetch_env_sources(spack_root, env_path, dry_run=dry_run, sandbox=sandbox)
+
         if cmd == "env-create":
             spec_name = custom_spec if custom_spec else DEFAULT_SPEC
-            print_minimal_advice(spack_root, env_name, sandbox, spec_name)
+            print_minimal_advice(
+                spack_root, env_name, sandbox, spec_name, fetched=getattr(args, "fetch", False)
+            )
             return 0
 
         if cmd == "env":

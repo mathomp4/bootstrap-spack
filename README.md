@@ -206,6 +206,23 @@ This is the recommended best practice on macOS for optimal performance and compa
 ./bootstrap_spack.py --spack mathomp4 env-create --auto-name \
   --compiler gcc@15 --python 3.12 --target x86_64_v3
 # Creates: geos-gcc15-py312 with x86_64_v3 optimizations
+
+# Pre-fetch source tarballs during environment creation (useful for offline compute nodes)
+./bootstrap_spack.py --spack official env-create --name grads-env --spec grads --fetch
+```
+
+### `fetch`
+Pre-fetch all source tarballs for an environment's dependencies into Spack's cache. Concretizes the environment and downloads all source archives on internet-connected nodes (e.g., login nodes) prior to building offline on compute nodes.
+
+```bash
+# Fetch sources for environment 'geos' (default)
+./bootstrap_spack.py --spack official fetch
+
+# Fetch sources for a specific environment by name
+./bootstrap_spack.py --spack official fetch --name grads-env
+
+# Fetch sources for an environment by explicit directory path
+./bootstrap_spack.py --spack official fetch --env-dir ~/spack-envs/grads-env
 ```
 
 ### `reset`
