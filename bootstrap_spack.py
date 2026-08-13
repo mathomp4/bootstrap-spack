@@ -951,7 +951,14 @@ def run(
     run_env = os.environ.copy()
     if env:
         run_env.update(env)
-    return subprocess.run(cmd, check=check, text=True, capture_output=True, env=run_env)
+    try:
+        return subprocess.run(cmd, check=check, text=True, capture_output=True, env=run_env)
+    except subprocess.CalledProcessError as err:
+        if err.stdout:
+            eprint(err.stdout.rstrip())
+        if err.stderr:
+            eprint(err.stderr.rstrip())
+        raise
 
 
 def run_bash(script: str, *, dry_run: bool, check: bool = True) -> subprocess.CompletedProcess:
@@ -1734,6 +1741,15 @@ def fetch_env_sources(
     if not spack_yaml.exists() and not dry_run:
         eprint(f"ERROR: Environment directory {env_dir} does not contain a spack.yaml file.")
         sys.exit(1)
+
+    eprint(f"==> Concretizing environment for fetching: {env_dir}")
+    spack_run(
+        spack_root,
+        ["--env-dir", str(env_dir), "concretize"],
+        dry_run=dry_run,
+        check=True,
+        sandbox=sandbox,
+    )
 
     eprint(f"==> Pre-fetching source tarballs for environment: {env_dir}")
     spack_run(
