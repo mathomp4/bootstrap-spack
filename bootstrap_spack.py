@@ -941,7 +941,12 @@ def resolve_packages_all_target(
 
 
 def run(
-    cmd: Sequence[str], *, dry_run: bool, check: bool = True, env: dict | None = None
+    cmd: Sequence[str],
+    *,
+    dry_run: bool,
+    check: bool = True,
+    env: dict | None = None,
+    stream_output: bool = False,
 ) -> subprocess.CompletedProcess:
     if dry_run:
         eprint("[dry-run]", " ".join(shlex.quote(c) for c in cmd))
@@ -952,7 +957,13 @@ def run(
     if env:
         run_env.update(env)
     try:
-        return subprocess.run(cmd, check=check, text=True, capture_output=True, env=run_env)
+        return subprocess.run(
+            cmd,
+            check=check,
+            text=True,
+            capture_output=not stream_output,
+            env=run_env,
+        )
     except subprocess.CalledProcessError as err:
         if err.stdout:
             eprint(err.stdout.rstrip())
@@ -961,8 +972,19 @@ def run(
         raise
 
 
-def run_bash(script: str, *, dry_run: bool, check: bool = True) -> subprocess.CompletedProcess:
-    return run(["bash", "-lc", script], dry_run=dry_run, check=check)
+def run_bash(
+    script: str,
+    *,
+    dry_run: bool,
+    check: bool = True,
+    stream_output: bool = False,
+) -> subprocess.CompletedProcess:
+    return run(
+        ["bash", "-lc", script],
+        dry_run=dry_run,
+        check=check,
+        stream_output=stream_output,
+    )
 
 
 def have(cmd: str) -> bool:
@@ -1145,9 +1167,15 @@ def spack_run(
     dry_run: bool,
     check: bool = True,
     sandbox: Path | None = None,
+    stream_output: bool = False,
 ) -> subprocess.CompletedProcess:
     env_vars = make_spack_env(sandbox)
-    return run_bash(spack_cmd(spack_root, args, env_vars), dry_run=dry_run, check=check)
+    return run_bash(
+        spack_cmd(spack_root, args, env_vars),
+        dry_run=dry_run,
+        check=check,
+        stream_output=stream_output,
+    )
 
 
 def spack_user_cfg_dir(spack_root: str, *, dry_run: bool, sandbox: Path | None = None) -> Path:
@@ -1658,13 +1686,16 @@ def create_env(
     specs = "\n".join(spec_lines)
 
     # Build packages block.
-    # - openmpi variants are always required for a working GEOS build.
-    # - python version/optimizations are only added when explicitly requested.
+    # - OpenMPI variants are required for GEOS builds, but not for unrelated
+    #   custom specs such as GrADS.
+    # - Python version/optimizations are only added when explicitly requested.
     # Target is written to the global user-scope packages.yaml by ensure_config,
     # not per-environment.
-    lines = ["  packages:"]
-    lines.append("    openmpi:")
-    lines.append("      require: '+fortran +internal-hwloc +internal-libevent +internal-pmix'")
+    include_openmpi = not custom_spec or custom_spec in {"geosgcm", "geosgcm-deps"}
+    lines = ["  packages:"] if include_openmpi or python or python_optimizations else []
+    if include_openmpi:
+        lines.append("    openmpi:")
+        lines.append("      require: '+fortran +internal-hwloc +internal-libevent +internal-pmix'")
     if python or python_optimizations:
         lines.append("    python:")
         if python:
@@ -1735,8 +1766,14 @@ def fetch_env_sources(
     *,
     dry_run: bool,
     sandbox: Path | None = None,
+    fetch_timeout: int = 120,
+    fetch_retries: int = 3,
 ) -> None:
     """Pre-fetch all source tarballs for an environment's dependencies."""
+    if fetch_retries < 1:
+        raise ValueError("fetch_retries must be at least 1")
+    if fetch_timeout < 0:
+        raise ValueError("fetch_timeout cannot be negative")
     spack_yaml = env_dir / "spack.yaml"
     if not spack_yaml.exists() and not dry_run:
         eprint(f"ERROR: Environment directory {env_dir} does not contain a spack.yaml file.")
@@ -1751,14 +1788,42 @@ def fetch_env_sources(
         sandbox=sandbox,
     )
 
-    eprint(f"==> Pre-fetching source tarballs for environment: {env_dir}")
+    timeout_label = "disabled" if fetch_timeout == 0 else f"{fetch_timeout}s"
+    eprint(f"==> Setting fetch connection timeout: {timeout_label}")
     spack_run(
         spack_root,
-        ["--env-dir", str(env_dir), "fetch", "--dependencies"],
+        [
+            "config",
+            "--scope",
+            "user",
+            "add",
+            f"config:connect_timeout:{fetch_timeout}",
+        ],
         dry_run=dry_run,
         check=True,
         sandbox=sandbox,
     )
+
+    eprint(f"==> Pre-fetching source tarballs for environment: {env_dir}")
+    for attempt in range(1, fetch_retries + 1):
+        eprint(f"==> Fetch attempt {attempt}/{fetch_retries}")
+        try:
+            spack_run(
+                spack_root,
+                ["--env-dir", str(env_dir), "fetch", "--dependencies"],
+                dry_run=dry_run,
+                check=True,
+                sandbox=sandbox,
+                stream_output=True,
+            )
+            return
+        except subprocess.CalledProcessError:
+            if attempt == fetch_retries:
+                raise
+            eprint(
+                f"==> Fetch attempt {attempt}/{fetch_retries} failed; "
+                "retrying missing sources"
+            )
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -1950,6 +2015,18 @@ EXAMPLES:
         default=False,
         help="Pre-fetch source tarballs for environment dependencies after creation (for offline builds on compute nodes)",
     )
+    p_envc.add_argument(
+        "--fetch-timeout",
+        type=int,
+        default=120,
+        help="Connection timeout in seconds for source fetching (default: 120; 0 disables)",
+    )
+    p_envc.add_argument(
+        "--fetch-retries",
+        type=int,
+        default=3,
+        help="Number of source-fetch attempts (default: 3)",
+    )
 
     # fetch: pre-fetch source tarballs for environment dependencies (for offline builds)
     p_fetch = sub.add_parser(
@@ -1962,6 +2039,18 @@ EXAMPLES:
         "--env-dir",
         default=None,
         help="Explicit path to environment directory (overrides --name)",
+    )
+    p_fetch.add_argument(
+        "--fetch-timeout",
+        type=int,
+        default=120,
+        help="Connection timeout in seconds for source fetching (default: 120; 0 disables)",
+    )
+    p_fetch.add_argument(
+        "--fetch-retries",
+        type=int,
+        default=3,
+        help="Number of source-fetch attempts (default: 3)",
     )
 
     p.set_defaults(cmd="all")
@@ -2090,7 +2179,14 @@ def main(argv: list[str]) -> int:
         else:
             env_name = getattr(args, "name", "geos")
             env_path = base / "spack-envs" / env_name
-        fetch_env_sources(spack_root, env_path, dry_run=dry_run, sandbox=sandbox)
+        fetch_env_sources(
+            spack_root,
+            env_path,
+            dry_run=dry_run,
+            sandbox=sandbox,
+            fetch_timeout=args.fetch_timeout,
+            fetch_retries=args.fetch_retries,
+        )
         return 0
 
     if cmd in ("all", "env", "env-create"):
@@ -2162,7 +2258,14 @@ def main(argv: list[str]) -> int:
         )
 
         if getattr(args, "fetch", False):
-            fetch_env_sources(spack_root, env_path, dry_run=dry_run, sandbox=sandbox)
+            fetch_env_sources(
+                spack_root,
+                env_path,
+                dry_run=dry_run,
+                sandbox=sandbox,
+                fetch_timeout=args.fetch_timeout,
+                fetch_retries=args.fetch_retries,
+            )
 
         if cmd == "env-create":
             spec_name = custom_spec if custom_spec else DEFAULT_SPEC

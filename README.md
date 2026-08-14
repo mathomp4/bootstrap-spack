@@ -208,7 +208,18 @@ This is the recommended best practice on macOS for optimal performance and compa
 # Creates: geos-gcc15-py312 with x86_64_v3 optimizations
 
 # Pre-fetch source tarballs during environment creation (useful for offline compute nodes)
-./bootstrap_spack.py --spack official env-create --name grads-env --spec grads --fetch
+./bootstrap_spack.py --spack official env-create --name grads-env \
+  --spec 'grads ^hdf5~mpi' --fetch
+```
+
+Source fetching uses a 120-second connection timeout and retries failed fetches
+up to three times. Override these with `--fetch-timeout` and `--fetch-retries`.
+For example, on a slow or intermittently connected login node:
+
+```bash
+./bootstrap_spack.py --sandbox /discover/nobackup/projects/gmao/SIteam/Grads-from-Spack \
+  --spack official env-create --name grads-env --spec 'grads ^hdf5~mpi' --view --fetch \
+  --fetch-timeout 300 --fetch-retries 5
 ```
 
 ### `fetch`
@@ -421,6 +432,12 @@ source ~/spack-mathomp4/share/spack/setup-env.sh   # adjust path for your fork
 spack env activate -p geos-gcc15-py312                  # your environment name
 spack load geosgcm-deps
 ```
+
+### Discover Lmod modules
+
+For a Discover-specific GrADS-only Lmod tree, including module hash removal,
+module-set configuration, and stale spider-cache troubleshooting, see
+[`DISCOVER_LMOD.md`](DISCOVER_LMOD.md).
 
 ### Notes
 
@@ -802,7 +819,7 @@ This is a workaround for [Spack bug #51855](https://github.com/spack/spack/issue
 
 ### OpenMPI variants
 
-The generated `spack.yaml` always includes:
+For the default GEOS environments, the generated `spack.yaml` includes:
 
 ```yaml
 packages:
@@ -810,7 +827,10 @@ packages:
     require: '+fortran +internal-hwloc +internal-libevent +internal-pmix'
 ```
 
-These variants are required for a working GEOSgcm build. If your environment resolves to a different MPI implementation (e.g., `mpich`), the `openmpi:` stanza is silently ignored by Spack.
+These variants are required for a working GEOSgcm build. Custom non-GEOS
+specifications, such as `grads`, do not receive this OpenMPI requirement.
+If a GEOS environment resolves to a different MPI implementation (e.g.,
+`mpich`), the `openmpi:` stanza is silently ignored by Spack.
 
 ### Filesystem view
 
