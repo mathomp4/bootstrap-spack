@@ -1325,8 +1325,11 @@ import spack.config as cfg
 want_spec = 'tcsh@{tcsh_ver}'
 want_prefix = '{brew_prefix}'
 
+# Support both modern Spack (cfg.CONFIG) and older Spack (cfg.config or module-level cfg.get)
+config = getattr(cfg, 'CONFIG', None) or getattr(cfg, 'config', None) or cfg
+
 # Read user-scope packages (may be None)
-pkgs = cfg.get('packages', scope='user') or {{}}
+pkgs = config.get('packages', scope='user') or {{}}
 tcsh = (pkgs.get('tcsh') or {{}})
 exts = list(tcsh.get('externals') or [])
 
@@ -1342,7 +1345,7 @@ if not any(same(e) for e in exts):
 tcsh['externals'] = exts
 pkgs['tcsh'] = tcsh
 
-cfg.set('packages', pkgs, scope='user')
+config.set('packages', pkgs, scope='user')
 print("ok")
 """.lstrip()
 
